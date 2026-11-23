@@ -660,8 +660,9 @@ void test_motion(IGameInput* input) {
     // reading without Motion (it may simply run out and return READING_NOT_FOUND).
     IGameInputReading* motion_prev = nullptr;
     const HRESULT ph = input->GetPreviousReading(r, GameInputKindMotion, nullptr, &motion_prev);
-    check(ph != S_OK || (motion_prev && (motion_prev->GetInputKind() & GameInputKindMotion)),
-          "motion: GetPreviousReading with a Motion filter never returns a reading without Motion");
+    check(ph == S_OK ? (motion_prev && (motion_prev->GetInputKind() & GameInputKindMotion) != 0)
+                     : (ph == GAMEINPUT_E_READING_NOT_FOUND && !motion_prev),
+          "motion: GetPreviousReading with a Motion filter returns only Motion readings or READING_NOT_FOUND");
     if (motion_prev) motion_prev->Release();
     if (r) r->Release();
 
