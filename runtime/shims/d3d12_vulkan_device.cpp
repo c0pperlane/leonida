@@ -4839,6 +4839,12 @@ struct DeviceState {
     // Gives the S# `words` a sampler in set 0 and an entry in the hash table, unless it has them.
     bool bind_sampler(const leonida::gfx10::SamplerWords& words) { return bind_sampler_keyed(words, words); }
 
+    // Whether the hash table already has a sampler under these words.
+    bool has_sampler(const leonida::gfx10::SamplerWords& words) {
+        std::lock_guard lock(descriptor_mutex);
+        return sampler_entries.count(leonida::make_ssharp_key(words.data())) != 0;
+    }
+
     // A sampler made from `words`, found in the hash table by `key_words`: a static sampler's S# as the console's
     // shader compiler writes it, which differs from the layer's encoding in fields that don't change sampling
     // (register_static_samplers).
@@ -14820,7 +14826,22 @@ public:
             // The shader holds the S# the console's compiler baked in, which is not bit-equal to the layer's
             // encoding: give that form a key too, with the layer's sampler behind it.
             const leonida::gfx10::SamplerWords console = console_static_sampler_words(words, desc);
-            if (console != words && !state_.bind_sampler_keyed(console, words))
+            if (console == words) continue;
+            // The console encoding has no compare bit of its own (the instruction compares, not the S#), so a
+            // comparison sampler and a plain one with the same other fields share it. A Vulkan sampler can't be
+            // both: the first one registered keeps the key, and the clash is logged rather than silent (@paratustra).
+            {
+                std::lock_guard lock(console_static_mutex_);
+                const auto [it, inserted] = console_static_keys_.try_emplace(console, words);
+                if (!inserted) {
+                    if (it->second != words)
+                        log_once("static sampler: another sampler already has its console encoding (a comparison "
+                                 "and a plain sampler with the same fields?); register", int(s.shader_register));
+                    continue;
+                }
+            }
+            if (state_.has_sampler(console)) continue;  // a literal S# of a shader got there first
+            if (!state_.bind_sampler_keyed(console, words))
                 log_once("static sampler: no room for the console encoding's key; register", int(s.shader_register));
         }
     }
@@ -14842,6 +14863,7 @@ public:
             w[0] = (w[0] & ~(7u << 12)) | (std::uint32_t(desc.ComparisonFunc - D3D12_COMPARISON_FUNC_NEVER) << 12);
         if (desc.MaxLOD >= 16.0f) w[1] |= 0xFFFu << 12;
         w[2] |= 1u << 28;
+        w[3] &= ~g::kCompareNever;  // the layer's own mark for a NEVER comparison; the compiler doesn't write it
         const auto border = [](std::uint32_t mode) {
             return mode >= std::uint32_t(g::AddressMode::clamp_half_border);  // half, clamp and mirror-once border
         };
@@ -17126,6 +17148,9 @@ private:
     std::mutex raw_image_mutex_;
     using RawKey = std::tuple<std::uint64_t, UINT64, UINT, UINT, UINT>;
     std::map<RawKey, RawImage> raw_images_;
+    // Each static sampler's console encoding and the layer encoding registered behind it (register_static_samplers).
+    std::mutex console_static_mutex_;
+    std::map<leonida::gfx10::SamplerWords, leonida::gfx10::SamplerWords> console_static_keys_;
     std::atomic<bool> removed_{false};
     OwnedRuntime owned_;
     IUnknown* outer_ = nullptr;  // the Xbox-ABI proxy, which owns a reference to this device

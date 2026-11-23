@@ -1029,6 +1029,31 @@ int main() {
             EXPECT(sampler_index(console) != 0);
             std::printf("static sampler: the console compiler's encoding of it is in the hash table too\n");
         }
+        // A comparison sampler with ComparisonFunc NEVER: encode() marks it with the layer's own kCompareNever bit
+        // (WORD3 bit 12), which the console's compiler doesn't write, so the console key must not carry it
+        // (@paratustra). POINT, CLAMP, MaxLOD FLT_MAX: CLAMP_X/Y/Z 2, DEPTH_COMPARE_FUNC 0 -> 0x92; MAX_LOD 0xFFF
+        // -> 0xFFF000; MIP point, PRECLAMP -> 0x14000000; no border, no layer mark -> 0.
+        {
+            const g::SamplerWords console{0x92u, 0xFFF000u, 0x14000000u, 0u};
+            EXPECT(sampler_index(console) == 0);
+            D3D12_STATIC_SAMPLER_DESC never{};
+            never.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT;
+            never.AddressU = never.AddressV = never.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            never.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+            never.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
+            never.MaxLOD = D3D12_FLOAT32_MAX;
+            never.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_desc{};
+            root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_0;
+            root_desc.Desc_1_0.NumStaticSamplers = 1;
+            root_desc.Desc_1_0.pStaticSamplers = &never;
+            const std::vector<std::uint8_t> blob = serialize_root_signature(root_desc);
+            EXPECT(!blob.empty());
+            Ref<ID3D12RootSignature> root;
+            EXPECT(SUCCEEDED(device->CreateRootSignature(0, blob.data(), blob.size(), IID_PPV_ARGS(&root.p))));
+            EXPECT(sampler_index(console) != 0);
+            std::printf("static sampler: a NEVER comparison's console encoding has no layer mark\n");
+        }
 
         // The UINT texture's view in slot 0, and three border samplers after the first: UINT (0,0,0,0) and
         // (1,1,1,1) from CreateSampler2, which the proxy does not have (the inner device does), and float white.
