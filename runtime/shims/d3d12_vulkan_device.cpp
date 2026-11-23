@@ -1735,6 +1735,19 @@ bool alpha_unused(DXGI_FORMAT format) {
            format == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
 }
 
+// FORMAT_SUPPORT's CAST_WITHIN_BIT_LAYOUT: the formats of a TYPELESS family (depth formats and their plane views
+// included), which views reinterpret one as another. The host (RTX 5070 Ti and WARP) sets it on all of them and on
+// none of the family-less ones (R11G11B10_FLOAT, A8, R1, R9G9B9E5, the packed 4:2:2 pair, B5G6R5, B5G5R5A1, B4G4R4A4,
+// A4B4G4R4). R10G10B10_XR_BIAS_A2_UNORM has its own answer in the FORMAT_SUPPORT case.
+bool cast_within_bit_layout(DXGI_FORMAT format) {
+    const UINT f = static_cast<UINT>(format);
+    return (f >= DXGI_FORMAT_R32G32B32A32_TYPELESS && f <= DXGI_FORMAT_R10G10B10A2_UINT) ||
+           (f >= DXGI_FORMAT_R8G8B8A8_TYPELESS && f <= DXGI_FORMAT_R8_SINT) ||
+           (f >= DXGI_FORMAT_BC1_TYPELESS && f <= DXGI_FORMAT_BC5_SNORM) ||
+           f == DXGI_FORMAT_B8G8R8A8_UNORM || f == DXGI_FORMAT_B8G8R8X8_UNORM ||
+           (f >= DXGI_FORMAT_B8G8R8A8_TYPELESS && f <= DXGI_FORMAT_BC7_UNORM_SRGB);
+}
+
 // The 8-bit four-channel UNORM and SRGB formats in either channel order, B8G8R8X8 included. A texture in one of them
 // takes an RTV in another when its castable-format list names it: WARP and AMD's D3D12 driver store the clear or the
 // draw in the view's channel order and encoding.
@@ -15849,6 +15862,7 @@ public:
                     fs->Support1 |= D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE | D3D12_FORMAT_SUPPORT1_SHADER_GATHER |
                                     D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE_COMPARISON |
                                     D3D12_FORMAT_SUPPORT1_SHADER_GATHER_COMPARISON;
+                fs->Support1 |= D3D12_FORMAT_SUPPORT1_CAST_WITHIN_BIT_LAYOUT;  // R24G8 / R32G8X24 family members
                 return d3d12_trace::result(method, S_OK);
             }
             const Format fmt = texture_storage_format(fs->Format, false);
@@ -16057,6 +16071,7 @@ public:
                 s1 &= ~(D3D12_FORMAT_SUPPORT1_BLENDABLE | D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL |
                         D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD);
             }
+            if (cast_within_bit_layout(fs->Format)) s1 |= D3D12_FORMAT_SUPPORT1_CAST_WITHIN_BIT_LAYOUT;
             fs->Support1 = s1;
             fs->Support2 = s2;
             return d3d12_trace::result(method, S_OK);
@@ -16133,9 +16148,11 @@ public:
             // value below it is refused with E_INVALIDARG (0x5f crashed the host, so the test does not probe it).
             // Refuse the same way instead of echoing an unrepresentable value back: below 5.1, and between 5.1 and
             // 6.0, where no runtime defines a model (0x52-0x5f; E_INVALIDARG on the host runtime of an RTX 5070).
+            // Above the highest model the runtime defines (6.9, 0x69) is refused too: the RTX 5070 Ti and WARP both
+            // answer 0x6a..0x100 with E_INVALIDARG rather than clamping.
             const UINT requested = static_cast<UINT>(model->HighestShaderModel);
             if (requested < D3D_SHADER_MODEL_5_1 ||
-                (requested > D3D_SHADER_MODEL_5_1 && requested < D3D_SHADER_MODEL_6_0))
+                (requested > D3D_SHADER_MODEL_5_1 && requested < D3D_SHADER_MODEL_6_0) || requested > 0x69)
                 return E_INVALIDARG;
             if (model->HighestShaderModel > kHighestShaderModel) model->HighestShaderModel = kHighestShaderModel;
             return S_OK;
