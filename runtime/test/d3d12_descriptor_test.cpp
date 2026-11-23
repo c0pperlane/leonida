@@ -1000,6 +1000,36 @@ int main() {
                     UINT(std::size(static_cases)));
         EXPECT(static_created >= 3);  // 1.0 and 1.1 are in every d3d12.dll; 1.2 came later
 
+        // The console's shader compiler bakes a static sampler into the shader in its own form, which isn't
+        // bit-equal to encode(): the compare function copied for a plain filter, MaxLOD saturated instead of
+        // clamped to 15, MIP_POINT_PRECLAMP set, no border colour without a border address mode. These are the
+        // words it wrote for this description (LINEAR, CLAMP, MaxAnisotropy 16, LESS_EQUAL, OPAQUE_WHITE,
+        // MaxLOD FLT_MAX), worked out field by field: CLAMP_X/Y/Z 2, DEPTH_COMPARE_FUNC 3 -> 0x3092; MAX_LOD 0xFFF
+        // -> 0xFFF000; XY_MAG/XY_MIN linear, MIP linear, PRECLAMP -> 0x18500000; no border -> 0. CreateRootSignature
+        // gives that form a key too, so a shader holding it finds a sampler instead of the fallback.
+        {
+            const g::SamplerWords console{0x3092u, 0xFFF000u, 0x18500000u, 0u};
+            EXPECT(sampler_index(console) == 0);
+            D3D12_STATIC_SAMPLER_DESC fsr{};
+            fsr.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+            fsr.AddressU = fsr.AddressV = fsr.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            fsr.MaxAnisotropy = 16;
+            fsr.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            fsr.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+            fsr.MaxLOD = D3D12_FLOAT32_MAX;
+            fsr.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_desc{};
+            root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_0;
+            root_desc.Desc_1_0.NumStaticSamplers = 1;
+            root_desc.Desc_1_0.pStaticSamplers = &fsr;
+            const std::vector<std::uint8_t> blob = serialize_root_signature(root_desc);
+            EXPECT(!blob.empty());
+            Ref<ID3D12RootSignature> root;
+            EXPECT(SUCCEEDED(device->CreateRootSignature(0, blob.data(), blob.size(), IID_PPV_ARGS(&root.p))));
+            EXPECT(sampler_index(console) != 0);
+            std::printf("static sampler: the console compiler's encoding of it is in the hash table too\n");
+        }
+
         // The UINT texture's view in slot 0, and three border samplers after the first: UINT (0,0,0,0) and
         // (1,1,1,1) from CreateSampler2, which the proxy does not have (the inner device does), and float white.
         constexpr UINT uint_slot = 0, uint_black = 1, uint_white = 2, float_white = 3;

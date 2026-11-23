@@ -4837,11 +4837,16 @@ struct DeviceState {
     }
 
     // Gives the S# `words` a sampler in set 0 and an entry in the hash table, unless it has them.
-    bool bind_sampler(const leonida::gfx10::SamplerWords& words) {
+    bool bind_sampler(const leonida::gfx10::SamplerWords& words) { return bind_sampler_keyed(words, words); }
+
+    // A sampler made from `words`, found in the hash table by `key_words`: a static sampler's S# as the console's
+    // shader compiler writes it, which differs from the layer's encoding in fields that don't change sampling
+    // (register_static_samplers).
+    bool bind_sampler_keyed(const leonida::gfx10::SamplerWords& key_words, const leonida::gfx10::SamplerWords& words) {
         namespace g = leonida::gfx10;
         std::lock_guard lock(descriptor_mutex);
         if (!bindless) return false;
-        const leonida::DescriptorKey key = leonida::make_ssharp_key(words.data());
+        const leonida::DescriptorKey key = leonida::make_ssharp_key(key_words.data());
         if (sampler_entries.count(key)) return true;
         const g::Sampler sampler = g::decode(words);
         VkSamplerCreateInfo sampler_info = g::vulkan_sampler(sampler, max_sampler_lod_bias);
@@ -14806,10 +14811,43 @@ public:
                 log_once("static sampler not registered: a sampler CreateSampler2 refuses; flags", int(desc.Flags));
                 continue;
             }
-            if (!state_.bind_sampler(sampler2_words(desc)))
+            const leonida::gfx10::SamplerWords words = sampler2_words(desc);
+            if (!state_.bind_sampler(words)) {
                 log_once("static sampler not registered: no room in the bindless set; register",
                          int(s.shader_register));
+                continue;
+            }
+            // The shader holds the S# the console's compiler baked in, which is not bit-equal to the layer's
+            // encoding: give that form a key too, with the layer's sampler behind it.
+            const leonida::gfx10::SamplerWords console = console_static_sampler_words(words, desc);
+            if (console != words && !state_.bind_sampler_keyed(console, words))
+                log_once("static sampler: no room for the console encoding's key; register", int(s.shader_register));
         }
+    }
+
+    // A static sampler's S# as the console's shader compiler writes it into a shader that uses it, from the layer's
+    // encoding of the same description. Measured on the one shader in the package whose root signature declares
+    // the static sampler it samples with (amd_fidelityfx_upscaler_xbox.dll; every sampling field matched), and
+    // consistent with all 27 distinct literal S# values in the game's own shaders:
+    // - DEPTH_COMPARE_FUNC is ComparisonFunc - 1 even when the filter doesn't compare (a plain sample ignores it);
+    // - a MaxLOD past the 4.8 field saturates it (0xFFF) where encode() clamps to 15.0 (0xF00);
+    // - MIP_POINT_PRECLAMP (WORD2 bit 28) is set;
+    // - the border colour (type and pointer) is zero unless an address mode uses the border.
+    // Only the hash table key changes: the Vulkan sampler is still made from the layer's encoding, so a plain
+    // sample never gets a comparing sampler from the copied compare function.
+    static leonida::gfx10::SamplerWords console_static_sampler_words(leonida::gfx10::SamplerWords w,
+                                                                    const D3D12_SAMPLER_DESC2& desc) {
+        namespace g = leonida::gfx10;
+        if (desc.ComparisonFunc >= D3D12_COMPARISON_FUNC_NEVER && desc.ComparisonFunc <= D3D12_COMPARISON_FUNC_ALWAYS)
+            w[0] = (w[0] & ~(7u << 12)) | (std::uint32_t(desc.ComparisonFunc - D3D12_COMPARISON_FUNC_NEVER) << 12);
+        if (desc.MaxLOD >= 16.0f) w[1] |= 0xFFFu << 12;
+        w[2] |= 1u << 28;
+        const auto border = [](std::uint32_t mode) {
+            return mode >= std::uint32_t(g::AddressMode::clamp_half_border);  // half, clamp and mirror-once border
+        };
+        if (!border((w[0] >> 0) & 7) && !border((w[0] >> 3) & 7) && !border((w[0] >> 6) & 7))
+            w[3] &= ~((3u << 30) | 0xFFFu);
+        return w;
     }
 
     // Why the PC runtime refuses a D3D12_SAMPLER_DESC2, or null. The non-normalized rules are its debug layer's
