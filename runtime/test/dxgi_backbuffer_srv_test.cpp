@@ -1,4 +1,5 @@
-// Sample DXGI back buffers through D3D12 SRVs across Present, ResizeBuffers, and swapchain release.
+// Sample DXGI back buffers through D3D12 SRVs (default, explicit and _SRGB) across Present, ResizeBuffers, and
+// swapchain release.
 #ifndef VK_USE_PLATFORM_WIN32_KHR
 #define VK_USE_PLATFORM_WIN32_KHR
 #endif
@@ -172,7 +173,8 @@ int run(vktest::Device& vk) {
     UINT64 fence_value = 0;
     unsigned mismatches = 0;
     const auto sample = [&](const char* label, ID3D12Resource* image, const D3D12_SHADER_RESOURCE_VIEW_DESC* desc,
-                            std::uint32_t expected) -> int {
+                            std::uint32_t expected, std::uint32_t clear = 0) -> int {
+        if (!clear) clear = expected;
         device->CreateRenderTargetView(image, nullptr, rtv);
         device->CreateShaderResourceView(image, desc, srv);
         Ref<ID3D12CommandAllocator> allocator;
@@ -187,7 +189,7 @@ int run(vktest::Device& vk) {
         // COMMON for the offscreen control and PRESENT for the swapchain are both zero.
         barrier(image, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
         float color[4];
-        for (UINT i = 0; i < 4; ++i) color[i] = float((expected >> (8 * i)) & 0xffu) / 255.0f;
+        for (UINT i = 0; i < 4; ++i) color[i] = float((clear >> (8 * i)) & 0xffu) / 255.0f;
         list->ClearRenderTargetView(rtv, color, 0, nullptr);
         barrier(image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         ID3D12DescriptorHeap* heaps[] = {srvs.p, samplers.p};
@@ -244,14 +246,15 @@ int run(vktest::Device& vk) {
     EXPECT(sample("regular texture", control.p, nullptr, 0xab8a6034) == 0);
     EXPECT(mismatches == 0);
     const auto sample_backbuffer = [&](const char* label, UINT expected_width, const D3D12_SHADER_RESOURCE_VIEW_DESC* d,
-                                       std::uint32_t expected, Ref<ID3D12Resource>& backbuffer) -> int {
+                                       std::uint32_t expected, Ref<ID3D12Resource>& backbuffer,
+                                       std::uint32_t clear = 0) -> int {
         const UINT index = chain->GetCurrentBackBufferIndex();
         EXPECT(index < sd.BufferCount);
         EXPECT(SUCCEEDED(chain->GetBuffer(index, IID_PPV_ARGS(&backbuffer.p))) && backbuffer.p);
         const auto desc = backbuffer->GetDesc();
         EXPECT(desc.Width == expected_width && desc.Height == height && desc.Format == format);
         std::printf("%s uses back buffer %u\n", label, index);
-        return sample(label, backbuffer.p, d, expected);
+        return sample(label, backbuffer.p, d, expected, clear);
     };
     {
         Ref<ID3D12Resource> first, second;
@@ -263,6 +266,18 @@ int run(vktest::Device& vk) {
         EXPECT(first.p != second.p);
     }
 
+    // An _SRGB view of the UNORM back buffer decodes the cleared bytes to linear: e1 c6 80 -> c0 90 37, alpha as
+    // stored (the D3D12 sRGB curve; each decoded value is within 0.05 of a whole step, so packUnorm4x8 is exact).
+    D3D12_SHADER_RESOURCE_VIEW_DESC srgb_view = view;
+    srgb_view.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    constexpr std::uint32_t srgb_clear = 0x7f80c6e1;
+    constexpr std::uint32_t srgb_linear = 0x7f3790c0;
+    {
+        Ref<ID3D12Resource> third;
+        EXPECT(SUCCEEDED(chain->Present(0, 0)));
+        EXPECT(sample_backbuffer("sRGB SRV after Present", width, &srgb_view, srgb_linear, third, srgb_clear) == 0);
+    }
+
     EXPECT(SUCCEEDED(chain->ResizeBuffers(0, width * 2, height, DXGI_FORMAT_UNKNOWN, 0)));
     EXPECT(chain->GetCurrentBackBufferIndex() == 0);
     Ref<ID3D12Resource> retained;
@@ -270,6 +285,8 @@ int run(vktest::Device& vk) {
     chain.reset();
     chain1.reset();
     EXPECT(sample("retained back buffer after swapchain release", retained.p, &view, 0xe173bb36) == 0);
+    EXPECT(sample("sRGB SRV of the resized retained back buffer", retained.p, &srgb_view, srgb_linear,
+                  srgb_clear) == 0);
     EXPECT(mismatches == 0);
     return 0;
 }

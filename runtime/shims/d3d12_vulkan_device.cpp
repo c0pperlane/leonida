@@ -16736,7 +16736,7 @@ private:
     // A shader-resource view of a DXGI back buffer: no Resource of this device but an image the swap chain registered
     // with the context (dxgi_com.cpp), which gives it a T# address when the chain was made with
     // DXGI_USAGE_SHADER_INPUT. Its image has one mip and one layer of a typed colour format, so the T# is the whole
-    // image in that format. False when `resource` is no such image.
+    // image in that format (or its sRGB partner). False when `resource` is no such image.
     bool write_back_buffer_srv(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC* desc,
                                D3D12_CPU_DESCRIPTOR_HANDLE destination) {
         namespace g = leonida::gfx10;
@@ -16755,13 +16755,18 @@ private:
                      int(desc->ViewDimension));
             return true;
         }
-        if (format != DXGI_FORMAT_UNKNOWN && format != rd.Format) {
-            log_once("back-buffer shader-resource view in another format:", int(format));
+        // An 8-bit UNORM back buffer is also viewable in its sRGB format (host-measured on WARP), which the offscreen
+        // image lists (dxgi_swapchain.h).
+        const bool srgb = format != DXGI_FORMAT_UNKNOWN && format != rd.Format &&
+                          binding->srgb_view_format != VK_FORMAT_UNDEFINED &&
+                          vulkan_format(format, false).format == binding->srgb_view_format;
+        if (format != DXGI_FORMAT_UNKNOWN && format != rd.Format && !srgb) {
+            log_once("back-buffer shader-resource view format not supported; format", int(format));
             return true;
         }
         g::Image image{};
         image.address = binding->swapchain_image_address;
-        image.format = g::format_from_vulkan(binding->format);
+        image.format = g::format_from_vulkan(srgb ? binding->srgb_view_format : binding->format);
         image.type = g::ImageType::image_2d;
         image.width = std::uint32_t(rd.Width);
         image.height = rd.Height;

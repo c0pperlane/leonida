@@ -251,7 +251,19 @@ public:
         b.mip_levels = 1;
         b.array_layers = 1;
         b.presentable = !offscreen;
+        b.srgb_view_format = offscreen ? srgb_partner(format_) : VK_FORMAT_UNDEFINED;
         return b;
+    }
+
+    // The other half of an 8-bit UNORM / sRGB pair, which the offscreen back buffers also list as a view format.
+    static VkFormat srgb_partner(VkFormat format) {
+        switch (format) {
+        case VK_FORMAT_R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_SRGB;
+        case VK_FORMAT_R8G8B8A8_SRGB: return VK_FORMAT_R8G8B8A8_UNORM;
+        case VK_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_SRGB;
+        case VK_FORMAT_B8G8R8A8_SRGB: return VK_FORMAT_B8G8R8A8_UNORM;
+        default: return VK_FORMAT_UNDEFINED;
+        }
     }
 
 private:
@@ -336,6 +348,16 @@ private:
                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
             ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            // D3D12 lets an application view an 8-bit UNORM back buffer through its _SRGB format (an SRV that
+            // reads linear colour; host-measured on WARP). Vulkan needs a mutable image that lists both formats.
+            const VkFormat view_formats[2] = {format_, srgb_partner(format_)};
+            VkImageFormatListCreateInfo format_list{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+            if (view_formats[1] != VK_FORMAT_UNDEFINED) {
+                format_list.viewFormatCount = 2;
+                format_list.pViewFormats = view_formats;
+                ici.pNext = &format_list;
+                ici.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+            }
             VkImage img = VK_NULL_HANDLE;
             if (fn_.create_image(device_, &ici, nullptr, &img) != VK_SUCCESS) {
                 destroy_offscreen();
