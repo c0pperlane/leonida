@@ -3456,10 +3456,13 @@ That import must be shimmed. The shim provides:
 **What exists.** The DXGI shim's `Present` (`runtime/shims/dxgi_com.cpp`) has its own surface, swapchain and
 blit (`leonida::VulkanSwapchain`, `runtime/shims/dxgi_swapchain.h`); `PresentX` (`runtime/shims/xbox_present.cpp`)
 is implemented over `leonida::VulkanPresenter` (section 3.2) instead. `PresentX` takes ordinary committed
-textures and blits them at present time, which frees the game's buffer count and format from the surface's. The
-DXGI shim's `GetBuffer(i)` returns the swapchain images themselves, and switches to offscreen images blitted at
-present only when the requested size or format differs from the surface's (`runtime/shims/dxgi_swapchain.h`); its
-buffer count is the swapchain's image count.
+textures and blits them at present time, which frees the game's buffer count and format from the surface's.
+The DXGI shim keeps a ring of offscreen images with the requested buffer count. `GetBuffer(i)` returns the
+same image for a given index until a resize. `Present` blits the current image into the acquired surface image
+and advances to the next slot. On a chain created with `DXGI_USAGE_SHADER_INPUT`,
+`CreateShaderResourceView` accepts a default view or an explicit view in the back buffer's format.
+The `dxgi_backbuffer_srv` test checks the sampled colours across `Present` and `ResizeBuffers`, and while
+the application holds a `GetBuffer` reference after releasing the chain.
 
 **PresentX and frame events (GDKX).** Public Microsoft samples present on Xbox without a DXGI swapchain. Facts
 below come from MIT/zlib-licensed code and docs, read directly; none is from the game or the SDK. Sources:

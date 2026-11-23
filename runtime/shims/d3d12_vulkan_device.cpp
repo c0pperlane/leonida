@@ -4509,10 +4509,6 @@ struct DeviceState {
         border_color_table.push_back(entry);
         return idx;
     }
-    // A T# names a texture by an address of its own: above 4 GiB, which the GPU address arena for buffers (docs
-    // section 3.3) stays below, and 256 bytes apart (the T# keeps addresses in 256-byte units). Nothing
-    // dereferences it.
-    std::atomic<std::uint64_t> next_image_address{std::uint64_t(1) << 32};
 
     // 0 float, 1 unsigned integer, 2 signed integer: which of the three storage-image arrays a view belongs in.
     static int numeric_class(VkFormat format) {
@@ -4540,7 +4536,13 @@ struct DeviceState {
         }
     }
 
-    void release(const ImageEntry& entry) {  // descriptor_mutex held
+    void release(const ImageEntry& entry, bool swapchain_idle) {  // descriptor_mutex held
+        if (swapchain_idle) {
+            bindless->remove_image(entry.dimension, entry.index);
+            context->vk.vkDestroyImageView(info.device, entry.sampled, nullptr);
+            if (entry.storage) context->vk.vkDestroyImageView(info.device, entry.storage, nullptr);
+            return;
+        }
         const std::uint64_t slot_handle =
             (static_cast<std::uint64_t>(entry.dimension) << 32) | static_cast<std::uint64_t>(entry.index);
         context->defer_destroy(leonida::DeferredDeletionQueue::Kind::bindless_slot, slot_handle);
@@ -4814,24 +4816,26 @@ struct DeviceState {
     }
 
     // The texture at `address` is gone: its views leave set 0 and its T#s the hash table.
-    void forget_image(std::uint64_t address) {
+    // `swapchain_idle`: a DXGI back buffer whose image goes once this returns, with the device idle, so its views go
+    // now instead of after the next submission.
+    void forget_image(std::uint64_t address, bool swapchain_idle = false) {
         std::lock_guard lock(descriptor_mutex);
         images_by_address.erase(address);
-        forget_image_views_locked(address);
+        forget_image_views_locked(address, swapchain_idle);
     }
-    void forget_image_views_locked(std::uint64_t address) {
+    void forget_image_views_locked(std::uint64_t address, bool swapchain_idle = false) {
         if (!bindless) return;
         const auto [first, last] = image_keys.equal_range(address);
         for (auto it = first; it != last; ++it) {
             const auto entry = image_entries.find(it->second);
             bindless->erase_key(it->second);
-            release(entry->second);
+            release(entry->second, swapchain_idle);
             image_entries.erase(entry);
         }
         image_keys.erase(first, last);
         std::erase_if(replaced_images, [&](const ImageEntry& entry) {
             if (entry.address != address) return false;
-            release(entry);
+            release(entry, swapchain_idle);
             return true;
         });
     }
@@ -6203,7 +6207,7 @@ public:
         sparse_image_ = true;
         format_ = format.format;
         aspects_ = format.aspects;
-        image_address_ = device_.next_image_address.fetch_add(256);
+        image_address_ = device_.context->allocate_image_address();
         device_.note_image_address(image_address_, this);
         binding_.image = image_;
         binding_.format = format_;
@@ -6548,7 +6552,7 @@ public:
         uint_backed_ = format.uint_backed;
         a8_as_alpha_ = format.a8_as_alpha;
         aspects_ = format.aspects;
-        image_address_ = device_.next_image_address.fetch_add(256);
+        image_address_ = device_.context->allocate_image_address();
         device_.note_image_address(image_address_, this);
         binding.deferred_memory = deferred_attachment_.get();
         if (origin == TitleImageOrigin::placed && leonida::mem_probe::interval_seconds())
@@ -11492,6 +11496,9 @@ public:
                 if (st->bindless) st->bindless->remove_image(static_cast<leonida::ImageDimension>(dim), idx);
             },
             &state_);
+        state_.context->set_swapchain_image_release([this](std::uint64_t address) {
+            state_.forget_image(address, /*swapchain_idle=*/true);
+        });
         state_.context->set_bindless_prepare([this](VkCommandBuffer command_buffer) {
             std::unique_lock lock(state_.descriptor_mutex);
             if (!state_.bindless->fallbacks_ready()) state_.bindless->record_fallback_init(command_buffer);
@@ -11805,6 +11812,7 @@ public:
             state_.context->drain_deleted_resources(UINT64_MAX);
             state_.context->set_pipeline_workers(nullptr);  // before the pipeline cache is written and destroyed
             state_.context->set_bindless_release(nullptr, nullptr);
+            state_.context->set_swapchain_image_release(nullptr);
             state_.context->set_bindless_current(nullptr);  // the retired generations go with state_.bindless below
         }
         if (state_.context) {
@@ -14373,7 +14381,8 @@ public:
         std::memset(reinterpret_cast<void*>(destination.ptr), 0, kDescriptorSize);
         const Resource* r = Resource::from<Resource>(resource);
         if (!r) {
-            if (resource) stub("ID3D12Device::CreateShaderResourceView(resource from another device)");
+            if (resource && !write_back_buffer_srv(resource, desc, destination))
+                stub("ID3D12Device::CreateShaderResourceView(resource from another device)");
             return;
         }
         if (r->desc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) {
@@ -16722,6 +16731,57 @@ private:
         // The CPU UAV used by ClearUnorderedAccessView is independent of set 0.
         std::memcpy(reinterpret_cast<void*>(destination.ptr), words.data(), sizeof(words));
         resource.note_shader_view();
+    }
+
+    // A shader-resource view of a DXGI back buffer: no Resource of this device but an image the swap chain registered
+    // with the context (dxgi_com.cpp), which gives it a T# address when the chain was made with
+    // DXGI_USAGE_SHADER_INPUT. Its image has one mip and one layer of a typed colour format, so the T# is the whole
+    // image in that format. False when `resource` is no such image.
+    bool write_back_buffer_srv(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC* desc,
+                               D3D12_CPU_DESCRIPTOR_HANDLE destination) {
+        namespace g = leonida::gfx10;
+        const std::optional<leonida::ResourceBinding> binding = state_.context->resource_binding(resource_id(resource));
+        if (!binding) return false;
+        if (!binding->swapchain_image_address) {
+            log_once("shader-resource view of a back buffer without DXGI_USAGE_SHADER_INPUT; format",
+                     int(binding->format));
+            return true;
+        }
+        const D3D12_RESOURCE_DESC rd = resource->GetDesc();
+        const DXGI_FORMAT format = desc ? desc->Format : DXGI_FORMAT_UNKNOWN;
+        if (desc && (desc->ViewDimension != D3D12_SRV_DIMENSION_TEXTURE2D || desc->Texture2D.MostDetailedMip != 0 ||
+                     desc->Texture2D.PlaneSlice != 0)) {
+            log_once("back-buffer shader-resource view other than a 2D view of mip 0; dimension",
+                     int(desc->ViewDimension));
+            return true;
+        }
+        if (format != DXGI_FORMAT_UNKNOWN && format != rd.Format) {
+            log_once("back-buffer shader-resource view in another format:", int(format));
+            return true;
+        }
+        g::Image image{};
+        image.address = binding->swapchain_image_address;
+        image.format = g::format_from_vulkan(binding->format);
+        image.type = g::ImageType::image_2d;
+        image.width = std::uint32_t(rd.Width);
+        image.height = rd.Height;
+        if (desc) image.min_lod = desc->Texture2D.ResourceMinLODClamp;
+        const VkFormat view_format = g::vulkan_view_format(binding->format, image.format);
+        if (!image.format || view_format == VK_FORMAT_UNDEFINED) {
+            log_once("back-buffer format has no T# format:", int(rd.Format));
+            return true;
+        }
+        const g::Swizzle channels = g::format_swizzle(view_format);
+        const UINT mapping = desc ? desc->Shader4ComponentMapping : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        for (UINT i = 0; i < 4; ++i) {
+            const UINT from = D3D12_DECODE_SHADER_4_COMPONENT_MAPPING(i, mapping);
+            image.swizzle[i] = from < 4 ? channels[from]
+                               : from == D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0 ? g::select_zero : g::select_one;
+        }
+        const g::ImageWords words = g::encode(image);
+        if (!state_.bind_image(words, image, binding->image, binding->format, binding->aspects, false)) return true;
+        std::memcpy(reinterpret_cast<void*>(destination.ptr), words.data(), sizeof(words));
+        return true;
     }
 
     // Validation shared by CreateCommittedResource and CreateCommittedResource3; internal callers pass null `method`

@@ -46,6 +46,7 @@
 #include <memory>
 #include <mutex>
 #include <chrono>
+#include <optional>
 #include <unordered_set>
 #include <shared_mutex>
 #include <span>
@@ -1422,14 +1423,18 @@ public:
         }
     }
 
-    void remove_resource(ResourceId id) {
+    // DXGI waits for the device before retiring its externally owned images. Their cached views must disappear
+    // before those images are destroyed, without waiting for another submission to drain deferred deletions.
+    void remove_resource(ResourceId id, bool swapchain_idle = false) {
         VkImage img = VK_NULL_HANDLE;
+        std::uint64_t swapchain_image_address = 0;
         std::shared_ptr<SparseResource> sparse_resource;
         {
             std::unique_lock rlock(resource_mutex_);
             const auto it = resources_.find(id);
             if (it == resources_.end()) return;
             img = it->second.image;
+            swapchain_image_address = it->second.swapchain_image_address;
             unindex_buffer(id, it->second);
             resources_.erase(it);
             if (auto sparse = sparse_resources_.find(id); sparse != sparse_resources_.end()) {
@@ -1442,11 +1447,14 @@ public:
             storage_pending_.erase(id);
             std::erase_if(zero_pending_, [id](const PendingZero& zero) { return zero.id == id; });
         }
+        if (swapchain_idle && swapchain_image_address && swapchain_image_release_)
+            swapchain_image_release_(swapchain_image_address);
         if (img) {
             std::lock_guard vlock(views_mutex_);
             for (auto f = resolve_framebuffers_.begin(); f != resolve_framebuffers_.end();) {
                 if (std::get<0>(f->first) == img || std::get<1>(f->first) == img) {
-                    defer_destroy(DeferredDeletionQueue::Kind::framebuffer, f->second);
+                    if (swapchain_idle) vk.vkDestroyFramebuffer(device_, f->second, nullptr);
+                    else defer_destroy(DeferredDeletionQueue::Kind::framebuffer, f->second);
                     f = resolve_framebuffers_.erase(f);
                 } else {
                     ++f;
@@ -1454,7 +1462,8 @@ public:
             }
             for (auto v = views_.begin(); v != views_.end();) {
                 if (std::get<0>(v->first) == img) {
-                    defer_destroy(DeferredDeletionQueue::Kind::image_view, v->second);
+                    if (swapchain_idle) vk.vkDestroyImageView(device_, v->second, nullptr);
+                    else defer_destroy(DeferredDeletionQueue::Kind::image_view, v->second);
                     v = views_.erase(v);
                 } else {
                     ++v;
@@ -1675,6 +1684,20 @@ public:
         start = hit.start;
         size = hit.size;
         return true;
+    }
+
+    std::optional<ResourceBinding> resource_binding(ResourceId id) {
+        std::shared_lock lock(resource_mutex_);
+        const auto* binding = resolve(id);
+        if (!binding) return std::nullopt;
+        return *binding;
+    }
+
+    // A T# names an image by a unique address above the buffer arena's 4 GiB limit. T# units are 256 bytes.
+    std::uint64_t allocate_image_address() { return next_image_address_.fetch_add(256, std::memory_order_relaxed); }
+
+    void set_swapchain_image_release(std::function<void(std::uint64_t)> release) {
+        swapchain_image_release_ = std::move(release);
     }
 
     bool ray_tracing_supported() const { return ray_tracing_ && vk.vkCmdBuildAccelerationStructuresKHR != nullptr; }
@@ -2203,6 +2226,8 @@ private:
     std::unique_ptr<FenceWaitDispatcher> fence_dispatcher_;
     QueueHolds<VkSemaphore> holds_;
     std::unordered_map<ResourceId, ResourceBinding> resources_;
+    std::atomic<std::uint64_t> next_image_address_{std::uint64_t(1) << 32};
+    std::function<void(std::uint64_t)> swapchain_image_release_;
     BufferVaIndex<ResourceId> buffer_vas_;  // the addressable buffers of resources_, by VA range (buffer_at)
     std::unordered_map<ResourceId, std::shared_ptr<SparseResource>> sparse_resources_;
     std::unordered_map<std::uintptr_t, ComputePipeline> pipelines_;

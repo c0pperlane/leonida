@@ -152,12 +152,17 @@ DXGI_FORMAT vk_to_dxgi_format(VkFormat fmt) {
 // leonida::ResourceId registered in VulkanContext, matching d3d12_com.h's resource_id(ID3D12Resource*) contract.
 class BackBufferResource final : public ID3D12ResourceStubs {
 public:
-    explicit BackBufferResource(const D3D12_RESOURCE_DESC& desc) : desc_(desc) {}
+    BackBufferResource(IUnknown& owner, const D3D12_RESOURCE_DESC& desc) : owner_(owner), desc_(desc) {}
 
-    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        const ULONG count = ++refs_;
+        if (count == 2) owner_.AddRef();  // the first external reference keeps the swap chain alive
+        return count;
+    }
     ULONG STDMETHODCALLTYPE Release() override {
+        IUnknown& owner = owner_;
         const ULONG left = --refs_;
-        if (!left) delete this;
+        if (left == 1) owner.Release();  // the last external reference can delete this buffer with its owner
         return left;
     }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
@@ -199,8 +204,13 @@ public:
     leonida::ResourceId resource_id() const { return reinterpret_cast<leonida::ResourceId>(this); }
     bool held_by_app() const { return refs_ > 1; }
 
+    void release_owner_reference() {
+        if (--refs_ == 0) delete this;
+    }
+
 private:
-    std::atomic<ULONG> refs_{1};
+    IUnknown& owner_;
+    std::atomic<ULONG> refs_{1};  // one reference belongs to the swap chain itself
     D3D12_RESOURCE_DESC desc_{};
 };
 
@@ -219,10 +229,9 @@ public:
     }
 
     ~SwapChain() {
-        unregister_buffers();
         if (restrict_to_output_) restrict_to_output_->Release();
         if (waitable_) CloseHandle(waitable_);
-        swapchain_.close();
+        swapchain_.close([this] { unregister_buffers(); });
         if (device_) device_->Release();
         if (parent_) parent_->Release();
     }
@@ -395,7 +404,6 @@ public:
             return DXGI_ERROR_INVALID_CALL;
         if (present_queues && !std::all_of(present_queues, present_queues + target_count, is_direct_present_queue))
             return DXGI_ERROR_INVALID_CALL;
-        unregister_buffers();
         const VkExtent2D size = size_or_client(width, height, lost_ ? VkExtent2D{lost_width_, lost_height_}
                                                                      : swapchain_.extent());
         const std::uint32_t w = size.width;
@@ -410,13 +418,15 @@ public:
         // The size check also keeps vkCreateImage from an extent past the device's limits.
         const DXGI_FORMAT next_format = fmt != DXGI_FORMAT_UNKNOWN ? fmt : current_format();
         if (w > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION || h > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+            unregister_buffers();
             lose_buffers(w, h, static_cast<UINT>(target_count), next_format);
             return E_INVALIDARG;
         }
         // Format UNKNOWN keeps the swap chain's format, which after a failed ResizeBuffers is the one it asked for.
         const VkFormat resize_format = vk_fmt != VK_FORMAT_UNDEFINED ? vk_fmt
                                        : lost_ ? dxgi_to_vk_format(lost_format_) : VK_FORMAT_UNDEFINED;
-        if (!swapchain_.resize(w, h, resize_format, static_cast<std::uint32_t>(target_count), allow_tearing)) {
+        if (!swapchain_.resize(w, h, resize_format, static_cast<std::uint32_t>(target_count), allow_tearing,
+                               [this] { unregister_buffers(); })) {
             lose_buffers(w, h, static_cast<UINT>(target_count), next_format);
             return E_OUTOFMEMORY;
         }
@@ -650,16 +660,22 @@ private:
             swapchain_.is_offscreen() ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         buffers_.reserve(count);
         for (std::uint32_t i = 0; i < count; ++i) {
-            auto* bb = new BackBufferResource(desc);
-            context_.add_resource(bb->resource_id(), swapchain_.resource_binding(i), initial_layout);
+            auto* bb = new BackBufferResource(*this, desc);
+            auto binding = swapchain_.resource_binding(i);
+            if (buffer_usage_ & DXGI_USAGE_SHADER_INPUT) {
+                binding.sampled = true;
+                binding.sampled_in_general = true;
+                binding.swapchain_image_address = context_.allocate_image_address();
+            }
+            context_.add_resource(bb->resource_id(), binding, initial_layout);
             buffers_.push_back(bb);
         }
     }
 
     void unregister_buffers() {
         for (auto* bb : buffers_) {
-            context_.remove_resource(bb->resource_id());
-            bb->Release();
+            context_.remove_resource(bb->resource_id(), /*swapchain_idle=*/true);
+            bb->release_owner_reference();
         }
         buffers_.clear();
     }

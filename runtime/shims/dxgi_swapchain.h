@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -134,9 +135,10 @@ public:
 
     ~VulkanSwapchain() { close(); }
 
-    // The COM owner calls this before releasing its reference to the D3D12 queue and device.
-    void close() {
-        destroy_swapchain();
+    // The COM owner calls this before releasing its reference to the D3D12 queue and device. `retire_buffers` runs
+    // once the device is idle, before the back buffers are destroyed.
+    void close(const std::function<void()>& retire_buffers = {}) {
+        destroy_swapchain(retire_buffers);
         if (blit_pool_) fn_.destroy_cmd_pool(device_, std::exchange(blit_pool_, VK_NULL_HANDLE), nullptr);
         if (surface_) fn_.destroy_surface(instance_, std::exchange(surface_, VK_NULL_HANDLE), nullptr);
         if (acquire_fence_) fn_.destroy_fence(device_, std::exchange(acquire_fence_, VK_NULL_HANDLE), nullptr);
@@ -164,12 +166,11 @@ public:
     }
 
     bool resize(std::uint32_t width, std::uint32_t height, VkFormat preferred_format = VK_FORMAT_UNDEFINED,
-                std::uint32_t buffer_count = 0, bool allow_tearing = false) {
+                std::uint32_t buffer_count = 0, bool allow_tearing = false,
+                const std::function<void()>& retire_buffers = {}) {
         if (!loaded_ || !surface_) return false;
-        {
-            std::lock_guard lock(submit_mutex_);
-            observe(fn_.device_wait_idle(device_), "vkDeviceWaitIdle (DXGI)");
-        }
+        wait_idle();
+        if (retire_buffers) retire_buffers();
         allow_tearing_ = allow_tearing;
         const VkFormat fmt = (preferred_format != VK_FORMAT_UNDEFINED) ? preferred_format : format_;
         const std::uint32_t count = buffer_count ? buffer_count : exposed_count_;
@@ -258,6 +259,11 @@ private:
         return DeviceFaultDiagnostics::observe(diagnostics_, result, operation);
     }
 
+    void wait_idle() {
+        std::lock_guard lock(submit_mutex_);
+        observe(fn_.device_wait_idle(device_), "vkDeviceWaitIdle (DXGI)");
+    }
+
     bool transition_image_layout(VkImage img, VkImageLayout old_layout, VkImageLayout new_layout) {
         if (!blit_cmd_ || !blit_fence_ || !img) return false;
         std::lock_guard lock(submit_mutex_);
@@ -295,10 +301,13 @@ private:
         offscreen_memory_.clear();
     }
 
-    void destroy_swapchain() {
+    // The back buffers' cached views and set-0 slots go in `retire_buffers`, once the device is idle and before the
+    // images are destroyed; it runs without the submit lock, which the context's own locks may not be taken under.
+    void destroy_swapchain(const std::function<void()>& retire_buffers = {}) {
         if (swapchain_ || !offscreen_images_.empty()) {
+            wait_idle();
+            if (retire_buffers) retire_buffers();
             std::lock_guard lock(submit_mutex_);
-            observe(fn_.device_wait_idle(device_), "vkDeviceWaitIdle (DXGI)");
             destroy_offscreen();
             if (swapchain_) {
                 fn_.destroy_swapchain(device_, swapchain_, nullptr);

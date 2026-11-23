@@ -4005,6 +4005,13 @@ if(TARGET Vulkan::Headers)
       target_compile_options(d3d12_depth_stencil_uav_test PRIVATE /W4 /permissive- /utf-8)
       add_test(NAME d3d12_depth_stencil_uav COMMAND d3d12_depth_stencil_uav_test)
       set_tests_properties(d3d12_depth_stencil_uav PROPERTIES SKIP_RETURN_CODE 77)
+      add_executable(dxgi_backbuffer_srv_test test/dxgi_backbuffer_srv_test.cpp ${LEONIDA_TEST_CS_SET0_SAMPLE})
+      target_link_libraries(dxgi_backbuffer_srv_test PRIVATE gta6rt_d3d12_com)
+      target_compile_definitions(dxgi_backbuffer_srv_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+                                 LEONIDA_TEST_CS_SET0_SAMPLE_SPV="${LEONIDA_TEST_CS_SET0_SAMPLE}")
+      target_compile_options(dxgi_backbuffer_srv_test PRIVATE /W4 /permissive- /utf-8)
+      add_test(NAME dxgi_backbuffer_srv COMMAND dxgi_backbuffer_srv_test)
+      set_tests_properties(dxgi_backbuffer_srv PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 45)
       # Bindless table churn on a direct and a compute queue: the table grows and live keys move without a
       # device-idle wait (D3D-314); the same shader, run twice (deferred retirement, and the old wait for timing).
       add_executable(d3d12_bindless_churn_test test/d3d12_bindless_churn_test.cpp shims/d3d12_xs_device.cpp shims/d3d12_xs_pso_stream.cpp

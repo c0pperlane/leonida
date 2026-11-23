@@ -122,6 +122,7 @@ struct ResourceBinding {
     bool (*ensure_residency)(void*) = nullptr;
     ResourceId depth_conversion = 0;  // R32_FLOAT transfer image for a widened Xbox D16+S8 attachment
     bool indirect_arguments = false;   // the backing VkBuffer was created with INDIRECT_BUFFER usage
+    std::uint64_t swapchain_image_address = 0;  // the T# address of a shader-input back buffer
 };
 
 struct VulkanAccess {
