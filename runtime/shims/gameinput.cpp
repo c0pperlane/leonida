@@ -2393,7 +2393,10 @@ HRESULT find_reading(IGameInputReading* ref, uint32_t kind, IGameInputDevice* de
     for (Device* d : scope)
         for (Reading* c : d->history) {
             const bool beyond = forward ? c->order() > r->order() : c->order() < r->order() && c->order() > horizon;
-            if (beyond && (!best || (c->order() < best->order()) == forward)) best = c;  // the nearest one
+            // A device may advertise Motion/RawDeviceReport before its readings carry that kind (see #5053).
+            // A history walk must skip those readings, or a Motion/Raw query can return one without the data.
+            if (beyond && reading_matches(c, kind) &&
+                (!best || (c->order() < best->order()) == forward)) best = c;  // the nearest one
         }
     if (!best) return GAMEINPUT_E_READING_NOT_FOUND;
     best->AddRef();

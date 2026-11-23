@@ -654,6 +654,15 @@ void test_motion(IGameInput* input) {
     check(input->GetCurrentReading(GameInputKindMotion, nullptr, &r) == S_OK && r &&
               (r->GetInputKind() & GameInputKindMotion),
           "motion: a motion reading is found by kind with no device");
+
+    // RT-370: find_reading used to pick the nearest reading in history by order alone, so a Motion query could land
+    // on a plain-pad reading that carries no Motion state. Walking back from this Motion reading must skip every
+    // reading without Motion (it may simply run out and return READING_NOT_FOUND).
+    IGameInputReading* motion_prev = nullptr;
+    const HRESULT ph = input->GetPreviousReading(r, GameInputKindMotion, nullptr, &motion_prev);
+    check(ph != S_OK || (motion_prev && (motion_prev->GetInputKind() & GameInputKindMotion)),
+          "motion: GetPreviousReading with a Motion filter never returns a reading without Motion");
+    if (motion_prev) motion_prev->Release();
     if (r) r->Release();
 
     r = nullptr;
