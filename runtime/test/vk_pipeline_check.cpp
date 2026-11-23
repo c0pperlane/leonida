@@ -1281,43 +1281,9 @@ int main(int argc, char** argv) {
                 return "no VK_KHR_shader_fma (shaderFmaFloat64)";
 #endif
             }
-        }
-        return {};
-    };
-
-    // Keep the remaining pipeline compatibility checks after module creation.
-    auto check_missing_feature = [&](const ShaderMeta& meta) -> std::string {
-        const uint32_t need_pc = required_push_bytes(meta.push_constant_bytes, meta.pc_tail_bytes);
-        if (need_pc > props.limits.maxPushConstantsSize) {
-            return "needs " + std::to_string(need_pc) + " push-constant bytes, device has " +
-                   std::to_string(props.limits.maxPushConstantsSize) +
-                   (need_pc > 128 ? " (translate with --pc-tail-ubo)" : "");
-        }
-        if (is_graphics_stage(meta.stage) && !f13.dynamicRendering) return "no dynamicRendering";
-        if (meta.stage == "ms" && !(ext_mesh && mesh.meshShader)) return "no VK_EXT_mesh_shader";
-        if (meta.stage == "gs" && !f2.features.geometryShader) return "no geometryShader";
-        if (meta.needs_maintenance8) {
-#ifdef VK_KHR_MAINTENANCE_8_EXTENSION_NAME
-            if (!(ext_m8 && m8.maintenance8)) return "no VK_KHR_maintenance8";
-#else
-            return "no VK_KHR_maintenance8";
-#endif
-        }
-        // Execution modes the translator declares (SignedZeroInfNanPreserve 32, and 64 with Float64;
-        // DenormPreserve 16) need a device property, not a feature.
-        for (const auto& fc : meta.float_controls) {
-            if (fc == "shaderSignedZeroInfNanPreserveFloat32") {
-                if (!indexed.shaderSignedZeroInfNanPreserveFloat32) return "no " + fc;
-            } else if (fc == "shaderSignedZeroInfNanPreserveFloat64") {
-                if (!indexed.shaderSignedZeroInfNanPreserveFloat64) return "no " + fc;
-            } else if (fc == "shaderDenormPreserveFloat16") {
-                if (!indexed.shaderDenormPreserveFloat16) return "no " + fc;
-            } else {
-                return "unknown float control " + fc;
-            }
-        }
-        // Per-format read/write support for formatless storage is checked when the runtime binds the actual view.
-        for (const auto& feat : meta.features) {
+            // Each of these is a SPIR-V capability or extension: the validation layer rejects the module
+            // (VUID-VkShaderModuleCreateInfo-pCode-08740/08742) on a device without the feature.
+            // Per-format read/write support for formatless storage is checked when the runtime binds the actual view.
             if (feat == "meshShader" && !(ext_mesh && mesh.meshShader)) return "no VK_EXT_mesh_shader";
             if (feat == "geometryShader" && !f2.features.geometryShader) return "no geometryShader";
             if (feat == "fragmentShaderBarycentric" && !(ext_bary && bary.fragmentShaderBarycentric)) return "no fragmentShaderBarycentric";
@@ -1336,6 +1302,42 @@ int main(int argc, char** argv) {
                     return "no shaderStorageImageWriteWithoutFormat";
                 if (feat == "shaderStorageImageReadWithoutFormat" && !f2.features.shaderStorageImageReadWithoutFormat)
                     return "no shaderStorageImageReadWithoutFormat";
+            }
+        }
+        // An image Offset outside a gather is invalid SPIR-V to the layer without maintenance8
+        // (VUID-RuntimeSpirv-Offset-10213), also at vkCreateShaderModule.
+        if (meta.needs_maintenance8) {
+#ifdef VK_KHR_MAINTENANCE_8_EXTENSION_NAME
+            if (!(ext_m8 && m8.maintenance8)) return "no VK_KHR_maintenance8";
+#else
+            return "no VK_KHR_maintenance8";
+#endif
+        }
+        return {};
+    };
+
+    // Keep the remaining pipeline compatibility checks after module creation.
+    auto check_missing_feature = [&](const ShaderMeta& meta) -> std::string {
+        const uint32_t need_pc = required_push_bytes(meta.push_constant_bytes, meta.pc_tail_bytes);
+        if (need_pc > props.limits.maxPushConstantsSize) {
+            return "needs " + std::to_string(need_pc) + " push-constant bytes, device has " +
+                   std::to_string(props.limits.maxPushConstantsSize) +
+                   (need_pc > 128 ? " (translate with --pc-tail-ubo)" : "");
+        }
+        if (is_graphics_stage(meta.stage) && !f13.dynamicRendering) return "no dynamicRendering";
+        if (meta.stage == "ms" && !(ext_mesh && mesh.meshShader)) return "no VK_EXT_mesh_shader";
+        if (meta.stage == "gs" && !f2.features.geometryShader) return "no geometryShader";
+        // Execution modes the translator declares (SignedZeroInfNanPreserve 32, and 64 with Float64;
+        // DenormPreserve 16) need a device property, not a feature.
+        for (const auto& fc : meta.float_controls) {
+            if (fc == "shaderSignedZeroInfNanPreserveFloat32") {
+                if (!indexed.shaderSignedZeroInfNanPreserveFloat32) return "no " + fc;
+            } else if (fc == "shaderSignedZeroInfNanPreserveFloat64") {
+                if (!indexed.shaderSignedZeroInfNanPreserveFloat64) return "no " + fc;
+            } else if (fc == "shaderDenormPreserveFloat16") {
+                if (!indexed.shaderDenormPreserveFloat16) return "no " + fc;
+            } else {
+                return "unknown float control " + fc;
             }
         }
         return {};
