@@ -447,6 +447,14 @@ void test_raw_hid(IGameInput* input) {
           "raw hid: before the first input report a reading carries no raw report");
     if (reading) reading->Release();
 
+    reading = nullptr;
+    check(input->GetCurrentReading(GameInputKindRawDeviceReport, rdev, &reading) == GAMEINPUT_E_READING_NOT_FOUND &&
+              !reading,
+          "raw hid: before the first report a raw query on the device is READING_NOT_FOUND");
+    check(input->GetCurrentReading(GameInputKindRawDeviceReport, nullptr, &reading) == GAMEINPUT_E_READING_NOT_FOUND &&
+              !reading,
+          "raw hid: before the first report a raw query with no device is READING_NOT_FOUND");
+
     g_raw.inputs.push_back({0x01, 0x11, 0x22, 0x33});
     g_raw.inputs.push_back({0x09, 0x99});              // an id the descriptor does not declare: ignored
     rt::gameinput::poll();
@@ -467,6 +475,12 @@ void test_raw_hid(IGameInput* input) {
     check(rr && !rr->GetItemValue(0, &item) && item == 0 && !rr->SetItemValue(0, 1) && !rr->ResetAllItems(),
           "raw hid: the item calls answer false (no item tables)");
     if (rr) rr->Release();
+    if (reading) reading->Release();
+
+    reading = nullptr;
+    check(input->GetCurrentReading(GameInputKindRawDeviceReport, nullptr, &reading) == S_OK && reading &&
+              (reading->GetInputKind() & GameInputKindRawDeviceReport) && device_of(reading) == rdev,
+          "raw hid: a raw reading is found by kind with no device");
     if (reading) reading->Release();
 
     void* created = nullptr;
@@ -614,6 +628,12 @@ void test_motion(IGameInput* input) {
           "motion: before the first sample, GetMotionState is false even on a sensor pad");
     if (r) r->Release();
 
+    r = nullptr;
+    check(input->GetCurrentReading(GameInputKindMotion, mdev, &r) == GAMEINPUT_E_READING_NOT_FOUND && !r,
+          "motion: before the first sample, a motion query on the sensor pad is READING_NOT_FOUND");
+    check(input->GetCurrentReading(GameInputKindMotion, nullptr, &r) == GAMEINPUT_E_READING_NOT_FOUND && !r,
+          "motion: before the first sample, a motion query with no device is READING_NOT_FOUND");
+
     // 9.80665 m/s^2 is half of the 2 g maximum; 17.4533 rad/s is half of 2000 deg/s. A reading with the sample needs
     // either a gamepad change or the ~8 ms motion cadence, so the test waits out the window before polling.
     send_motion(gyro_pad, 0.0f, 0.0f, 9.80665f, 17.4533f, 0.0f, 0.0f);
@@ -629,6 +649,12 @@ void test_motion(IGameInput* input) {
     check(ms.magnetometerAccuracy == GameInputMotionAccuracyUnknown &&
               ms.orientationAccuracy == GameInputMotionAccuracyUnknown,
           "motion: sensors the shim does not provide report Unknown");
+
+    r = nullptr;
+    check(input->GetCurrentReading(GameInputKindMotion, nullptr, &r) == S_OK && r &&
+              (r->GetInputKind() & GameInputKindMotion),
+          "motion: a motion reading is found by kind with no device");
+    if (r) r->Release();
 
     r = nullptr;
     check(input->GetCurrentReading(GameInputKindMotion, pdev, &r) == GAMEINPUT_E_READING_NOT_FOUND && !r,
