@@ -761,12 +761,21 @@ side inwards:
     shader declares set-0 bindings is created with and binds.
 - **Layouts.** A descriptor in set 0 has one image layout for as long as it lives, but D3D12 lets a texture be
   sampled in a shader-resource state and also while promoted from `COMMON`, which is `GENERAL` here (section
-  4.3). So with the bindless set, a texture's shader-resource states use `GENERAL` too
-  (`ResourceBinding::sampled_in_general`), and every descriptor is written with `GENERAL`. This follows from the
-  Vulkan rule that a descriptor's layout matches the image's; no test here can see it broken, because the
-  validation layer does not follow which element of a runtime array a shader reads. A depth texture sampled
-  while it is also bound read-only (`DEPTH_READ` with a shader-resource state) is in
-  `DEPTH_STENCIL_READ_ONLY_OPTIMAL` and is not handled.
+  4.3). So with the bindless set, every state a texture is sampled in uses `GENERAL` too
+  (`ResourceBinding::sampled_in_general`, `image_layout` in `vulkan_replay.h`), and every descriptor is written
+  with `GENERAL`. Those states are the shader-resource states, `DEPTH_READ` with a shader-resource state (a depth
+  buffer read-only for the depth test and sampled at once), and the enhanced `DEPTH_STENCIL_READ` layout, which
+  allows `SHADER_RESOURCE` access without another layout change. Plain `DEPTH_READ`, which no shader reads, keeps
+  `DEPTH_STENCIL_READ_ONLY_OPTIMAL`, the layout a driver can keep depth compressed in for the depth test; whether
+  `GENERAL` costs that compression (on AMD, say) is not measured here, and the shader-resource states already pay
+  it. This follows from the Vulkan rule that a descriptor's layout matches the image's; no test here can see it
+  broken, because the validation layer does not follow which element of a runtime array a shader reads. With
+  `d3d12_descriptor_test` changed locally to sample its D16/D32 textures in `DEPTH_READ | NON_PIXEL_SHADER_RESOURCE`,
+  the SDK 1.4.363 layer, GPU-assisted validation included, reported nothing before this change
+  (`DEPTH_STENCIL_READ_ONLY_OPTIMAL`) or after it, on an RTX 5080 Laptop GPU and a Radeon 610M, and both read the
+  cleared depth. `d3d12_state_map_test` checks the layout each barrier records (RT-BINDLESS-DEPTH-READ-SRV-LAYOUT).
+  A draw that binds the texture as its DSV still moves it to `DEPTH_STENCIL_ATTACHMENT_OPTIMAL` (read-only DSVs,
+  in the known gaps below).
 
 A typed single-sampled 3D texture can use a default SRV or an explicit `TEXTURE3D` SRV of the same format.
 An `R8G8B8A8_TYPELESS` volume supports explicit `R8G8B8A8_UNORM` and `R8G8B8A8_UNORM_SRGB` SRVs.

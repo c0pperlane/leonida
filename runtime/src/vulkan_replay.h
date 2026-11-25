@@ -82,8 +82,9 @@ struct ResourceBinding {
     bool simultaneous_access = false;  // D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS: always GENERAL
     bool not_zeroed = false;           // D3D12_HEAP_FLAG_CREATE_NOT_ZEROED: first use skips the zero fill
     // A descriptor in the bindless set 0 has one layout, but D3D12 lets a texture be sampled both in a
-    // shader-resource state and while promoted from common (GENERAL). With this set, the shader-resource states
-    // use GENERAL too, so the descriptor's layout is right in both.
+    // shader-resource state and while promoted from common (GENERAL). With this set, the states a shader samples in
+    // (shader-resource, and read-only depth with shader reads: image_layout) use GENERAL too, so the descriptor's
+    // layout is right in all of them.
     bool sampled_in_general = false;
     VkBuffer buffer = VK_NULL_HANDLE;  // a buffer resource, for copies
     VkDeviceSize buffer_offset = 0;    // where it starts in `buffer` (the GPU address arena holds many)
@@ -135,7 +136,8 @@ inline constexpr VkImageAspectFlags depth_stencil_aspects = VK_IMAGE_ASPECT_DEPT
 
 // Maps a legacy D3D12_RESOURCE_STATES combination to the Vulkan layout, accesses and stages that cover it.
 // Read-only combinations share one layout when every bit agrees on it (depth_read with shader reads stays in
-// DEPTH_STENCIL_READ_ONLY_OPTIMAL, which can be sampled); otherwise they fall back to GENERAL.
+// DEPTH_STENCIL_READ_ONLY_OPTIMAL, which can be sampled, unless image_layout moves it to GENERAL for set 0);
+// otherwise they fall back to GENERAL.
 // Buffer-only and extension states map to GENERAL with conservative memory access.
 // conditional_rendering: VK_EXT_conditional_rendering is enabled. PREDICATION shares its bit with
 // INDIRECT_ARGUMENT, and conditional rendering reads the predicate in a stage of its own, so the bit covers both.
@@ -422,15 +424,24 @@ inline VkImageLayout vulkan_layout(std::uint32_t layout, bool presentable) {
     }
 }
 
-// The layout an image actually uses: simultaneous-access images live in GENERAL, and so do images in a
-// shader-resource state when set 0 names them (sampled_in_general).
-inline VkImageLayout image_layout(const ResourceBinding& resource, VkImageLayout layout) {
+// The layout an image actually uses: simultaneous-access images live in GENERAL, and so do images in a state a
+// shader samples them in when set 0 names them (sampled_in_general), since set 0's descriptors say GENERAL. Those
+// are the shader-resource states and the read-only depth layout when shaders may read in it too (shader_reads):
+// the enhanced DEPTH_STENCIL_READ layout allows SHADER_RESOURCE access, and so does DEPTH_READ with a
+// shader-resource state. Plain DEPTH_READ, which no shader reads, keeps DEPTH_STENCIL_READ_ONLY_OPTIMAL.
+inline VkImageLayout image_layout(const ResourceBinding& resource, VkImageLayout layout, bool shader_reads = true) {
     if (resource.simultaneous_access && layout != VK_IMAGE_LAYOUT_UNDEFINED &&
         layout != VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
         return VK_IMAGE_LAYOUT_GENERAL;
-    if (resource.sampled_in_general && layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    if (resource.sampled_in_general && (layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+                                        (shader_reads && layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)))
         return VK_IMAGE_LAYOUT_GENERAL;
     return layout;
+}
+
+// A legacy state's layout (vulkan_access): its accesses say whether a shader reads the image in it.
+inline VkImageLayout image_layout(const ResourceBinding& resource, const VulkanAccess& state) {
+    return image_layout(resource, state.layout, (state.access & VK_ACCESS_SHADER_READ_BIT) != 0);
 }
 
 // Bytes per texel, or per 4x4 block for block-compressed formats, of one aspect as copies lay it out in a buffer
@@ -4438,9 +4449,9 @@ inline void emit_commands(const PreparedList& prepared, VkCommandBuffer command_
                 continue;
             }
             const auto range = detail::planes_for_layout(p.binding, p.range, separate);
-            const VkImageLayout new_layout = image_layout(p.binding, to.layout);
-            auto pieces = detail::current(tracker, id, range, image_layout(p.binding, from.layout));
-            detail::initialize(vk, command_buffer, p.binding, id, pieces, image_layout(p.binding, from.layout), tracker);
+            const VkImageLayout new_layout = image_layout(p.binding, to);
+            auto pieces = detail::current(tracker, id, range, image_layout(p.binding, from));
+            detail::initialize(vk, command_buffer, p.binding, id, pieces, image_layout(p.binding, from), tracker);
             for (const auto& piece : pieces)
                 detail::image_barrier(vk, command_buffer, p.binding, piece.range, piece.layout, new_layout,
                                       from.access, from.stages, to.access, to.stages);

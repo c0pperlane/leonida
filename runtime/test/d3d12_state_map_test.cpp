@@ -497,6 +497,63 @@ static int state_map_tests() {
     CHECK(image_layout(simultaneous, VK_IMAGE_LAYOUT_UNDEFINED) == VK_IMAGE_LAYOUT_UNDEFINED);
     CHECK(image_layout(color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
+    // Set 0 writes every descriptor with GENERAL (sampled_in_general), so each state a shader samples a depth texture
+    // in is GENERAL too: a shader-resource state, DEPTH_READ with one (read-only for the depth test and sampled at
+    // once), and the enhanced DEPTH_STENCIL_READ layout, which allows SHADER_RESOURCE access. Plain DEPTH_READ, which
+    // no shader reads, keeps the read-only depth layout, as does every state of a texture set 0 does not name.
+    // Through replay(): the layout each barrier records and the tracker keeps.
+    {
+        constexpr VkImageLayout depth_read_only = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        ResourceBinding sampled = depth_only;
+        sampled.sampled_in_general = true;
+        CHECK(image_layout(sampled, vulkan_layout(l::depth_stencil_read, false)) == VK_IMAGE_LAYOUT_GENERAL);
+        CHECK(image_layout(depth_only, vulkan_layout(l::depth_stencil_read, false)) == depth_read_only);
+        static std::vector<VkImageLayout> recorded;
+        ReplayFunctions vk{};
+        vk.pipeline_barrier = [](VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags,
+                                 std::uint32_t, const VkMemoryBarrier*, std::uint32_t, const VkBufferMemoryBarrier*,
+                                 std::uint32_t count, const VkImageMemoryBarrier* barriers) {
+            for (std::uint32_t i = 0; i < count; ++i) recorded.push_back(barriers[i].newLayout);
+        };
+        vk.pipeline_barrier2 = [](VkCommandBuffer, const VkDependencyInfo* info) {
+            for (std::uint32_t i = 0; i < info->imageMemoryBarrierCount; ++i)
+                recorded.push_back(info->pImageMemoryBarriers[i].newLayout);
+        };
+        // The layout one barrier from depth-write moves the texture to; MAX_ENUM if it records anything else.
+        const auto moved_to = [&](const ResourceBinding& binding, auto&& record) {
+            const auto resolve = [&](ResourceId id) -> const ResourceBinding* { return id == 1 ? &binding : nullptr; };
+            LayoutTracker tracker;
+            tracker.track(1, binding, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            CommandList list;
+            recorded.clear();
+            if (!record(list) || !list.close() ||
+                replay(list, VK_NULL_HANDLE, resolve, vk, &tracker) != ReplayResult::success ||
+                recorded.size() != 1 || tracker.layout(1, 0) != recorded[0])
+                return VK_IMAGE_LAYOUT_MAX_ENUM;
+            return recorded[0];
+        };
+        const auto legacy = [&](const ResourceBinding& binding, std::uint32_t after) {
+            return moved_to(binding, [&](CommandList& list) {
+                return list.transition({1, all_subresources, s::depth_write, after});
+            });
+        };
+        const auto enhanced = [&](const ResourceBinding& binding, std::uint32_t access) {
+            return moved_to(binding, [&](CommandList& list) {
+                return list.barrier(TextureBarrier{y::depth_stencil, y::all_shading, a::depth_stencil_write, access,
+                                                   l::depth_stencil_write, l::depth_stencil_read, 1,
+                                                   {all_subresources, 0, 0, 0, 0, 0}, 0});
+            });
+        };
+        CHECK(legacy(sampled, s::depth_read | s::pixel_shader_resource) == VK_IMAGE_LAYOUT_GENERAL);
+        CHECK(legacy(sampled, s::depth_read | s::pixel_shader_resource | s::non_pixel_shader_resource) ==
+              VK_IMAGE_LAYOUT_GENERAL);
+        CHECK(legacy(sampled, s::non_pixel_shader_resource) == VK_IMAGE_LAYOUT_GENERAL);
+        CHECK(legacy(sampled, s::depth_read) == depth_read_only);
+        CHECK(enhanced(sampled, a::depth_stencil_read | a::shader_resource) == VK_IMAGE_LAYOUT_GENERAL);
+        CHECK(legacy(depth_only, s::depth_read | s::pixel_shader_resource) == depth_read_only);
+        CHECK(enhanced(depth_only, a::depth_stencil_read | a::shader_resource) == depth_read_only);
+    }
+
     // D3D12_BARRIER_SUBRESOURCE_RANGE.
     CHECK(barrier_range(color, {7, 0, 0, 0, 0, 0}, range));  // a subresource index
     CHECK(range.baseMipLevel == 1 && range.baseArrayLayer == 2 && range.levelCount == 1);
