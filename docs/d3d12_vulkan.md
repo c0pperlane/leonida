@@ -2569,12 +2569,13 @@ The console has two list topologies Vulkan lacks: rectangle list (`IASetPrimitiv
   features are present).
 - `D3D12_FEATURE_SHADER_MODEL`: answer the shader model the layer can honour, not the driver's maximum. Nothing in
   the runtime compiles DXIL: the game's shaders arrive as SPIR-V from the offline translator, and the BVH
-  builder's container also carries a console FSSM program that the same translator handles. A request above 6.0 is
+  builder's container also carries a console FSSM program that the same translator handles. A request for 6.1-6.9 is
   clamped down to 6.0, a request for 5.1 is answered with 5.1 (D3D12's own baseline, which a caller asking for the
-  minimum expects), and a value below 5.1 is refused with `E_INVALIDARG`. Measured against the host PC runtime
-  (616.86) on an RTX 5070: 5.1-6.8 echo the request, 6.9 clamps to 6.8, and `0` is `E_INVALIDARG`; `0x5f` crashed
-  the host runtime, which the test records in a comment rather than repeating. WARP answers a 5.1 request the same
-  way.
+  minimum expects), and a value below 5.1, between 5.1 and 6.0, or above 6.9 (`0x6a`-`0x100`, which the RTX 5070 Ti,
+  the RTX 5080 Laptop and WARP refuse rather than clamp; `d3d12_feature_support_parity_test`) is refused with
+  `E_INVALIDARG`. Measured against the host PC runtime (616.86) on an RTX 5070: 5.1-6.8 echo the request, 6.9 clamps
+  to 6.8, and `0` is `E_INVALIDARG`; `0x5f` crashed the host runtime, which the test records in a comment rather than
+  repeating. WARP answers a 5.1 request the same way.
 - `D3D12_FEATURE_ROOT_SIGNATURE`: 1.1, the version the proxy can always produce. A 1.2 blob is rewritten as 1.1 when
   the host's serializer stops at 1.1 and nothing is lost (`d3d12_xs_rootsig.cpp`), and Windows 10's `d3d12.dll` stops
   there, so 1.1 is what the game can rely on everywhere. A 1.2 request is clamped down to 1.1, and an undefined value

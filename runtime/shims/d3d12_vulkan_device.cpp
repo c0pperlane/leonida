@@ -15862,7 +15862,8 @@ public:
                     fs->Support1 |= D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE | D3D12_FORMAT_SUPPORT1_SHADER_GATHER |
                                     D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE_COMPARISON |
                                     D3D12_FORMAT_SUPPORT1_SHADER_GATHER_COMPARISON;
-                fs->Support1 |= D3D12_FORMAT_SUPPORT1_CAST_WITHIN_BIT_LAYOUT;  // R24G8 / R32G8X24 family members
+                // R24G8 / R32G8X24 family members; not the console D16S8 planes, which no host answers for.
+                if (cast_within_bit_layout(fs->Format)) fs->Support1 |= D3D12_FORMAT_SUPPORT1_CAST_WITHIN_BIT_LAYOUT;
                 return d3d12_trace::result(method, S_OK);
             }
             const Format fmt = texture_storage_format(fs->Format, false);

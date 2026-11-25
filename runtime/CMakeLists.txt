@@ -2579,7 +2579,7 @@ if(TARGET Vulkan::Headers)
     set_tests_properties(d3d12_placed_heap_lifetime PROPERTIES SKIP_RETURN_CODE 77
                          FAIL_REGULAR_EXPRESSION "Validation Error;VUID-")
 
-    # CheckFeatureSupport answers (shader model, cast bit, packed 4:2:2 formats, tiled depth MSAA) against the host.
+    # CheckFeatureSupport answers (shader model, cast bit, tiled depth MSAA) against the host (WARP: PROBE_WARP=1).
     add_executable(d3d12_feature_support_parity_test test/d3d12_feature_support_parity_test.cpp)
     target_link_libraries(d3d12_feature_support_parity_test PRIVATE gta6rt_d3d12_com d3d12 dxgi)
     target_compile_definitions(d3d12_feature_support_parity_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
