@@ -7,9 +7,12 @@
 //
 // Two measurements:
 //   - per command type: a list of N commands of one kind (transitions come in pairs, queries as Begin+End),
-//     timed on its own, so one slow kind stands out;
+//     timed on its own, so one slow kind stands out; a draw comes as the steady state, which shares the views block
+//     of the draw before it, and "views rebuilt", which pays for the block a render-target or vertex-buffer change
+//     makes the layer build;
 //   - a frame: L lists of P passes, each pass a mix of what a frame records (barriers, whole-view and rectangle
-//     clears, buffer and texture copies, a UAV clear, queries, predication and indexed and non-indexed draws).
+//     clears, buffer and texture copies, a UAV clear, queries, predication and indexed and non-indexed draws, which
+//     rebuild the views block once per pass).
 // prepare includes refilling the PreparedList storage kept from the last execution (as VulkanQueue::execute keeps
 // prepared_) and planning the query batch. emit includes committing query state, as execute does.
 // Each figure is the median over --reps runs after --warmup runs. Heap allocations (global operator new) and
@@ -274,51 +277,27 @@ bool uav_clear(CommandList& list, std::uint32_t index) {
     return list.clear_unordered_access(view, false, {index, 0, 0, 0});
 }
 
-// A draw into the colour and depth targets, as a scene's mesh draws are: two vertex streams, and for `indexed`
-// a 16-bit index buffer; each draw reads its own part of the geometry arena.
-// d3d12_com.cpp::draw_views() rebuilds this block only when the render targets or the vertex buffers change, so a
-// steady-state draw shares one block and pays only the shared_ptr copy. A draw that changes that state pays the
-// make_shared instead. The two are different costs and the table measures them apart: only the second allocates.
-const std::shared_ptr<const DrawViews>& steady_views() {
-    static const std::shared_ptr<const DrawViews> views = [] {
-        auto v = std::make_shared<DrawViews>();
-        v->render_targets = {color_view};
-        v->vertex_buffers[0] = {Scene::geometry_va, 24576, 12};
-        v->vertex_buffers[1] = {Scene::geometry_va + 24576, 16384, 8};
-        return std::shared_ptr<const DrawViews>(std::move(v));
-    }();
+// The views block of a draw into the colour target with two vertex streams at `base`, built as
+// d3d12_com.cpp::draw_views() builds it after OMSetRenderTargets(1, ...) and IASetVertexBuffers(0, 2, ...): one
+// allocation and the block written out.
+std::shared_ptr<const DrawViews> make_views(std::uint64_t base) {
+    auto views = std::make_shared<DrawViews>();
+    views->render_targets = {color_view};
+    views->render_target_count = 1;
+    views->vertex_buffers[0] = {base, 24576, 12};  // by input slot
+    views->vertex_buffers[1] = {base + 24576, 16384, 8};
     return views;
 }
 
-// A draw as the layer records it in the steady state: the views block is the one already in hand.
-bool draw(CommandList& list, std::uint32_t index, bool indexed) {
+// A draw into the colour and depth targets, as a scene's mesh draws are: two vertex streams at `base`, and for
+// `indexed` a 16-bit index buffer after them. `views` is the block the layer has in hand: draw_views() rebuilds it
+// only when the render targets or the vertex buffers change, so a draw copies the shared_ptr and moves the Draw
+// into the list, as record_raster_draw does.
+bool draw(CommandList& list, const std::shared_ptr<const DrawViews>& views, std::uint64_t base, bool indexed) {
     Draw d{};
     d.pipeline = Scene::pipeline_id;
-    const std::shared_ptr<const DrawViews>& views = steady_views();
-    d.depth = depth_view;
     d.views = views;
-    if (indexed) d.index = {Scene::geometry_va + 40960, 6144, 57};
-    d.topology = 4;  // D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST
-    d.viewport = {0, 0, 1920, 1080, 0, 1};
-    d.scissor = {0, 0, 1920, 1080};
-    d.blend_factor = {1, 1, 1, 1};
-    d.indexed = indexed;
-    d.count = indexed ? 3072 : 2048;
-    d.instances = 1;
-    return list.draw(d);
-}
-
-// A draw that rebuilt its views first, which is what a state change costs: one allocation and the block written out.
-bool draw_rebuilt(CommandList& list, std::uint32_t index, bool indexed) {
-    Draw d{};
-    d.pipeline = Scene::pipeline_id;
-    auto views = std::make_shared<DrawViews>();
-    views->render_targets = {color_view};
     d.depth = depth_view;
-    const std::uint64_t base = Scene::geometry_va + (index % 256) * 65536ull;
-    views->vertex_buffers[0] = {base, 24576, 12};  // by input slot
-    views->vertex_buffers[1] = {base + 24576, 16384, 8};
-    d.views = std::move(views);
     if (indexed) d.index = {base + 40960, 6144, 57};
     d.topology = 4;  // D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST
     d.viewport = {0, 0, 1920, 1080, 0, 1};
@@ -327,7 +306,20 @@ bool draw_rebuilt(CommandList& list, std::uint32_t index, bool indexed) {
     d.indexed = indexed;
     d.count = indexed ? 3072 : 2048;
     d.instances = 1;
-    return list.draw(d);
+    return list.draw(std::move(d));
+}
+
+// A steady-state draw: no render target or vertex buffer changed since the last one, so it shares that draw's
+// views block and does not allocate.
+bool draw(CommandList& list, std::uint32_t, bool indexed) {
+    static const std::shared_ptr<const DrawViews> views = make_views(Scene::geometry_va);
+    return draw(list, views, Scene::geometry_va, indexed);
+}
+
+// A draw after a state change: the layer rebuilds the views block first. Each reads its own part of the arena.
+bool draw_rebuilt(CommandList& list, std::uint32_t index, bool indexed) {
+    const std::uint64_t base = Scene::geometry_va + (index % 256) * 65536ull;
+    return draw(list, make_views(base), base, indexed);
 }
 
 constexpr char texture_barrier_kind[] = "texture barrier pair (enh.)";
@@ -409,8 +401,11 @@ bool frame_pass(CommandList& l, std::uint32_t pass) {
               l.clear_render_target(color_view, black) && l.clear_depth_stencil(depth_view, clear_depth, 1, 0) &&
               l.begin_query({Scene::occlusion_heap, q::binary_occlusion, query}) &&
               l.clear_render_target(color_view, black, two_rects);
+    // The pass binds its targets and streams once, so its first draw rebuilds the views and the others share them.
+    const std::uint64_t base = Scene::geometry_va + (pass % 256) * 65536ull;
+    const std::shared_ptr<const DrawViews> views = make_views(base);
     for (std::uint32_t i = 0; ok && i < draws_per_pass; ++i)
-        ok = draw(l, pass * draws_per_pass + i, i % 4 != 3);  // three of four indexed
+        ok = draw(l, views, base, i % 4 != 3);  // three of four indexed
     return ok &&
            l.end_query({Scene::occlusion_heap, q::binary_occlusion, query}) &&
            l.transition({Scene::color, all_subresources, s::render_target, s::pixel_shader_resource}) &&
@@ -621,6 +616,16 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "FAIL %s: emit makes %.2f heap allocations per command\n", kind.name,
                          r.emit.allocations);
             ++failures;
+        }
+        // A draw records as the layer's do: in the steady state it shares the views block in hand and allocates
+        // nothing, and after a state change it allocates the new block and nothing else.
+        if (std::strncmp(kind.name, "draw", 4) == 0) {
+            const double expected = std::strstr(kind.name, "views rebuilt") ? 1 : 0;
+            if (r.record.allocations != expected) {
+                std::fprintf(stderr, "FAIL %s: record makes %.2f heap allocations per draw, not %.0f\n", kind.name,
+                             r.record.allocations, expected);
+                ++failures;
+            }
         }
         if (!self_test) print_row(kind.name, r, csv);
     }
