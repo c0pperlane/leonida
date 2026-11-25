@@ -676,16 +676,26 @@ int main(int argc, char** argv) {
             const auto& mixed = data[0];
             const auto& mesh_only = data[1];
             const auto& vertex_only = data[2];
-            std::printf("statistics, mixed: IA %llu/%llu VS %llu C %llu/%llu PS %llu CS %llu; mesh only: C %llu/%llu "
-                        "PS %llu; vertex only: C %llu PS %llu\n",
-                        mixed.IAVertices, mixed.IAPrimitives, mixed.VSInvocations, mixed.CInvocations,
-                        mixed.CPrimitives, mixed.PSInvocations, mixed.CSInvocations, mesh_only.CInvocations,
-                        mesh_only.CPrimitives, mesh_only.PSInvocations, vertex_only.CInvocations,
-                        vertex_only.PSInvocations);
+            // The geometry and tessellation counters of all three queries too, which must read 0 here: none of these
+            // draws has those stages, and AMD's NGG path counts GSInvocations for draws without a geometry shader
+            // (RT-PIPESTATS-NGG-GS-ZERO), so a failure names the counter.
+            std::printf("statistics, mixed: IA %llu/%llu VS %llu GS %llu/%llu HS %llu DS %llu C %llu/%llu PS %llu "
+                        "CS %llu; mesh only: GS %llu/%llu HS %llu DS %llu C %llu/%llu PS %llu; vertex only: GS "
+                        "%llu/%llu HS %llu DS %llu C %llu PS %llu\n",
+                        mixed.IAVertices, mixed.IAPrimitives, mixed.VSInvocations, mixed.GSInvocations,
+                        mixed.GSPrimitives, mixed.HSInvocations, mixed.DSInvocations, mixed.CInvocations,
+                        mixed.CPrimitives, mixed.PSInvocations, mixed.CSInvocations, mesh_only.GSInvocations,
+                        mesh_only.GSPrimitives, mesh_only.HSInvocations, mesh_only.DSInvocations,
+                        mesh_only.CInvocations, mesh_only.CPrimitives, mesh_only.PSInvocations,
+                        vertex_only.GSInvocations, vertex_only.GSPrimitives, vertex_only.HSInvocations,
+                        vertex_only.DSInvocations, vertex_only.CInvocations, vertex_only.PSInvocations);
             EXPECT(mixed.IAVertices == 6 && mixed.IAPrimitives == 2 && mixed.VSInvocations >= 1);
             EXPECT(vertex_only.IAVertices == 6 && vertex_only.IAPrimitives == 2);
+            // The mixed query is resolved through the segment sum, the vertex-only one by a plain copy.
             EXPECT(mixed.GSInvocations == 0 && mixed.GSPrimitives == 0 && mixed.HSInvocations == 0 &&
                    mixed.DSInvocations == 0 && mixed.CSInvocations == 0);
+            EXPECT(vertex_only.GSInvocations == 0 && vertex_only.GSPrimitives == 0 &&
+                   vertex_only.HSInvocations == 0 && vertex_only.DSInvocations == 0 && vertex_only.CSInvocations == 0);
             // The clipping invocations of the mesh segments (D3D-MESH-CLIPPING-COUNTER). Without the feature they
             // read 0; with it they are the mesh-primitives count of those segments.
             const auto mesh_clipping = mixed.CInvocations - vertex_only.CInvocations;

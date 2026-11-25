@@ -668,6 +668,9 @@ void test_query_state() {
     stats.commit();
     expect(stat.occlusion.at(0).first == 0 && stat.occlusion.at(1).first == 2 && sb == split_statistics_segments,
            "queue statistics pool sizing and disjoint bases");
+    // No draw of a geometry shader ran in these queries: GSInvocations and GSPrimitives read 0
+    // (RT-PIPESTATS-NGG-GS-ZERO).
+    const auto geometry_counter = [](unsigned j) { return j == 3 || j == 4; };
     for (unsigned i = 0; i < 2; ++i) {
         for (unsigned j = 0; j < statistics_counters; ++j) {
             std::uint64_t total = 0;
@@ -675,8 +678,8 @@ void test_query_state() {
             for (unsigned k = 0; k < r.count; ++k) {
                 total += c.values[sp->pool][r.first + k][j];
             }
-            expect(c.word(dst.buffer,
-                   arena_offset + statistics_offset + statistics_size * i + word_size * j) == total,
+            expect(c.word(dst.buffer, arena_offset + statistics_offset + statistics_size * i + word_size * j) ==
+                       (geometry_counter(j) ? 0 : total),
                    "all 11 split statistics counters");
         }
     }
@@ -730,7 +733,8 @@ void test_query_state() {
         for (unsigned k = 0; k < mixed_statistics_segments; ++k) {
             total += c.values[mixed_pool->pool][k][j];
         }
-        expect(c.word(dst.buffer, arena_offset + mixed_statistics_offset + word_size * j) == total,
+        expect(c.word(dst.buffer, arena_offset + mixed_statistics_offset + word_size * j) ==
+                   (geometry_counter(j) ? 0 : total),
                "mixed statistics sum");
         expect(c.word(dst.buffer, arena_offset + inner_statistics_offset + word_size * j) == c.word(dst.buffer,
                arena_offset + statistics_offset + word_size * j), "previous statistics sum inside a new scope");
@@ -941,6 +945,7 @@ void test_queue_segments() {
     driver.vkCmdWriteTimestamp = r.write_timestamp;
     driver.vkCmdCopyQueryPoolResults = r.copy_query_pool_results;
     driver.vkCmdFillBuffer = r.fill_buffer;
+    driver.vkCmdPipelineBarrier = r.pipeline_barrier;  // orders a statistics resolve's GS zeros
     driver.vkCreateCommandPool = +[](VkDevice, const VkCommandPoolCreateInfo*, const VkAllocationCallbacks*,
         VkCommandPool* p) {
         *p = handle<VkCommandPool>(1);

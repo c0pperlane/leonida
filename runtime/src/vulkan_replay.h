@@ -63,6 +63,7 @@
 #include <optional>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -850,6 +851,9 @@ struct QueryPool {
     std::uint32_t count = 0;
     bool precise = false;         // occlusionQueryPrecise: D3D12_QUERY_TYPE_OCCLUSION counts exact samples
     std::vector<bool> ended;
+    // A pipeline-statistics heap: the queries last ended over work with no draw of the application's geometry shader.
+    // Their GSInvocations and GSPrimitives resolve to 0, as D3D12 counts them (RT-PIPESTATS-NGG-GS-ZERO).
+    std::unordered_set<std::uint32_t> no_geometry;
     std::unordered_map<std::uint32_t, OcclusionResult> occlusion;
 };
 
@@ -887,6 +891,9 @@ struct GraphicsPipeline {
     std::uint32_t zero_step_slots = 0;    // per-instance slots with InstanceDataStepRate 0: stride 0 at draw time
     std::uint32_t strip_cut = 0;          // D3D12_INDEX_BUFFER_STRIP_CUT_VALUE (0: off, 1: 0xFFFF, 2: 0xFFFFFFFF)
     bool mesh = false;                    // a mesh shader instead of a vertex shader: drawn by DispatchMesh only
+    // The PSO has a geometry shader of the application's own (not the generated rectangle stage): its draws keep the
+    // driver's GSInvocations and GSPrimitives in a pipeline-statistics query (RT-PIPESTATS-NGG-GS-ZERO).
+    bool geometry = false;
     bool viewport_with_count = false;     // pipeline uses VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT / SCISSOR_WITH_COUNT
     // The same pipeline with some attachment formats VK_FORMAT_UNDEFINED, for a draw that leaves those slots
     // unbound (D3D12 allows it; dynamic rendering needs the formats to agree). Bit i: colour slot i, bit 8: depth
@@ -1260,6 +1267,9 @@ struct QueryResolveRun {
     // The mesh-primitives pool of the mesh segments (D3D-MESH-CLIPPING-COUNTER); null without meshShaderQueries.
     VkQueryPool primitives_pool = VK_NULL_HANDLE;
     const std::uint8_t* mesh = nullptr;
+    // Pipeline statistics of queries that held no draw of the application's geometry shader: emit_query writes 0 to
+    // their GSInvocations and GSPrimitives after the copy or sum (RT-PIPESTATS-NGG-GS-ZERO).
+    bool no_geometry = false;
 };
 
 struct PreparedQuery {
@@ -1278,6 +1288,9 @@ struct PreparedQuery {
     std::uint32_t statistics_first = 0;
     std::uint32_t statistics_count = 0;
     std::vector<QueryResolveRun> resolves;
+    // The EndQuery of a pipeline-statistics query: a draw with the application's geometry shader ran since its
+    // BeginQuery (RT-PIPESTATS-NGG-GS-ZERO).
+    bool geometry = false;
 };
 
 struct PreparedKhrPostbuild {
@@ -3341,6 +3354,10 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
         out.depth_uav_copies.push_back(copy);
         return ReplayResult::success;
     };
+    // RT-PIPESTATS-NGG-GS-ZERO: the draws so far with the application's geometry shader, and that count at the
+    // BeginQuery of each pipeline-statistics query, which its EndQuery compares (PreparedQuery::geometry).
+    std::uint32_t geometry_draws = 0;
+    std::map<std::pair<QueryHeapId, std::uint32_t>, std::uint32_t> geometry_at_begin;
 
     for (std::size_t i = 0; i < commands.size(); ++i) {
         const auto& command = commands[i];
@@ -3853,12 +3870,25 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
                 // of the application's counters.
                 if (range.type == d3d12_query::binary_occlusion && !vk.resolve_binary_occlusion)
                     return unsupported_at(__LINE__);
+                // The geometry counters of a statistics result are zeroed after its copy (RT-PIPESTATS-NGG-GS-ZERO).
+                if (range.type == d3d12_query::pipeline_statistics && !vk.pipeline_barrier)
+                    return unsupported_at(__LINE__);
                 if (p.binding.host_readable) {
                     out.wrote_readback = true;
                     out.readback_src_stages |= VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
                 }
             }
             out.queries.push_back({i, heap, statistics_active});
+            if (range.type == d3d12_query::pipeline_statistics && !std::holds_alternative<ResolveQueries>(command)) {
+                const auto key = std::pair{range.heap, range.first};
+                if (std::holds_alternative<BeginQuery>(command)) {
+                    geometry_at_begin[key] = geometry_draws;
+                } else {
+                    // D3D12 begins a query in the list that ends it; without a Begin, keep the driver's counts.
+                    const auto begin = geometry_at_begin.find(key);
+                    out.queries.back().geometry = begin == geometry_at_begin.end() || begin->second != geometry_draws;
+                }
+            }
         } else if (const auto* ind = std::get_if<ExecuteIndirect>(&command)) {
             if (!bind(ind->argument_buffer) || !p.binding.buffer) return unresolved_at(__LINE__);
             const VkDeviceSize record_size = detail::indirect_record_size(ind->kind);
@@ -4052,6 +4082,7 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
                 if (const auto r = detail::prepare_quad_indices(*draw.state, vk, prepared_draw); r != ReplayResult::success)
                     return r;
             }
+            if (!prepared_draw.skipped && prepared_draw.graphics && prepared_draw.graphics->geometry) ++geometry_draws;
             if (draw.arguments && !prepared_draw.skipped && vk.require_indirect_clamp) {
                 const auto& arg = *draw.arguments;
                 if (!vk.prepare_indirect_clamp || !vk.emit_indirect_clamp || (statistics_active && !statistics_helpers) ||
@@ -4131,7 +4162,7 @@ public:
             if (const auto* begin = std::get_if<BeginQuery>(&command)) {
                 pending_[{query.heap, begin->index}] = {};
             } else if (const auto* end = std::get_if<EndQuery>(&command)) {
-                Value result{true, {}};
+                Value result{true, {}, end->type == d3d12_query::pipeline_statistics && !query.geometry};
                 if (query.result_count) result.occlusion = {pool, base + query.first_result, query.result_count};
                 if (query.statistics_count)
                     result.occlusion = {statistics_pool, statistics_base + query.statistics_first,
@@ -4173,9 +4204,11 @@ public:
                         else needs_sum |= run.sum;
                         retain(saved.segments);
                     }
+                    run.no_geometry = statistics && run.pool && value.no_geometry;
                     if (!query.resolves.empty() && !run.sum && run.count == 1) {
                         auto& last = query.resolves.back();
-                        if (!last.sum && last.pool == run.pool && last.first + last.count == run.first) {
+                        if (!last.sum && last.pool == run.pool && last.first + last.count == run.first &&
+                            last.no_geometry == run.no_geometry) {
                             ++last.count;
                             continue;
                         }
@@ -4191,6 +4224,8 @@ public:
         for (auto& [key, result] : pending_) {
             const auto [heap, index] = key;
             heap->ended[index] = result.ended;
+            if (result.no_geometry) heap->no_geometry.insert(index);
+            else heap->no_geometry.erase(index);
             if (result.occlusion.segments) heap->occlusion[index] = std::move(result.occlusion);
             else heap->occlusion.erase(index);
         }
@@ -4206,12 +4241,15 @@ private:
     struct Value {
         bool ended = false;
         OcclusionResult occlusion;
+        bool no_geometry = false;  // QueryPool::no_geometry
     };
 
     Value lookup(QueryPool& heap, std::uint32_t index) const {
         if (const auto it = pending_.find({&heap, index}); it != pending_.end()) return it->second;
-        if (const auto it = heap.occlusion.find(index); it != heap.occlusion.end()) return {true, it->second};
-        return {heap.ended[index], {}};
+        const bool no_geometry = heap.no_geometry.count(index) != 0;
+        if (const auto it = heap.occlusion.find(index); it != heap.occlusion.end())
+            return {true, it->second, no_geometry};
+        return {heap.ended[index], {}, no_geometry};
     }
 
     void retain(const std::shared_ptr<const OcclusionSegmentPool>& pool) {
@@ -4320,6 +4358,27 @@ inline void emit_query(const PreparedList& list, const detail::PreparedQuery& qu
                 vk.copy_query_pool_results(cb, run.pool, run.first, run.count, dst, run.offset, size,
                                            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
             }
+        }
+        // RT-PIPESTATS-NGG-GS-ZERO: D3D12 counts GSInvocations and GSPrimitives (words 3 and 4 of the 11) only for
+        // a geometry shader of the application's. AMD's NGG path counts GSInvocations for draws without one (RDNA2
+        // on the Windows driver and on RADV, where RADV_DEBUG=nongg gives 0), and Vulkan counts the generated
+        // rectangle stage as a geometry shader, so a query with no draw of the application's own reads 0 there. The
+        // zeros wait for the copy or sum above.
+        // A query with a geometry-shader draw keeps the driver's counts, NGG's extra ones included: splitting
+        // statistics around those draws, as around mesh draws (D3D-291), is the point to revisit. Hull and domain
+        // shaders are refused, so HSInvocations and DSInvocations are the driver's until tessellation lands.
+        constexpr VkDeviceSize geometry_counters = 3 * sizeof(std::uint64_t);
+        bool ordered = false;
+        for (const auto& run : query.resolves) {
+            if (!run.no_geometry) continue;
+            if (!ordered) {
+                detail::memory_barrier(vk, cb, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                       VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                ordered = true;
+            }
+            for (std::uint32_t i = 0; i < (run.sum ? 1u : run.count); ++i)
+                vk.fill_buffer(cb, dst, run.offset + VkDeviceSize(i) * size + geometry_counters,
+                               2 * sizeof(std::uint64_t), 0);
         }
         if (suspend) vk.begin_conditional_rendering(cb, &predicate);
         begin_statistics();

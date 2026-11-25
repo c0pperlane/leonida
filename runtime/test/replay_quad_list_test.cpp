@@ -5,6 +5,8 @@
 //     then one draw over that scratch. The dispatch runs before the draw's rendering scope and outside a
 //     pipeline-statistics query, reads no index past the view, and a draw with more quads than one dispatch may
 //     cover is split into several.
+// The same draw path checks that a statistics query without a geometry-shader draw resolves GSInvocations and
+// GSPrimitives to 0 (RT-PIPESTATS-NGG-GS-ZERO).
 // No GPU: the Vulkan calls are recorded.
 #include "../src/vulkan_replay.h"
 
@@ -402,5 +404,72 @@ int main() {
             "begin_rendering", "bind_graphics", "draw_indexed", "end_rendering", "end_query 5"};
         ok &= check(events == want, "the dispatch runs between the query's two segments, the draw in the second");
     }
+
+    // RT-PIPESTATS-NGG-GS-ZERO, on the same draw path: a statistics query whose draws have no geometry shader of the
+    // application's resolves GSInvocations and GSPrimitives (bytes 24 to 40) to 0 after the copy; one with such a
+    // draw keeps the driver's counts. The heap remembers which, for a resolve in a later list.
+    for (const bool geometry : {false, true}) {
+        QueryPool heap{handle<VkQueryPool>(7), d3d12_query_heap::pipeline_statistics, 1, false, {false}, {}};
+        ResourceBinding target{};
+        target.buffer = handle<VkBuffer>(10);
+        target.size = 88;
+        ReplayFunctions queries = vk;
+        queries.reset_query_pool = +[](VkCommandBuffer, VkQueryPool, std::uint32_t, std::uint32_t) {};
+        queries.begin_query = begin_query;
+        queries.end_query = end_query;
+        queries.write_timestamp = +[](VkCommandBuffer, VkPipelineStageFlagBits, VkQueryPool, std::uint32_t) {};
+        queries.copy_query_pool_results = +[](VkCommandBuffer, VkQueryPool, std::uint32_t, std::uint32_t, VkBuffer,
+                                              VkDeviceSize, VkDeviceSize, VkQueryResultFlags) {
+            events.push_back("copy_query");
+        };
+        queries.fill_buffer = +[](VkCommandBuffer, VkBuffer, VkDeviceSize offset, VkDeviceSize size, std::uint32_t) {
+            events.push_back("fill " + std::to_string(offset) + "+" + std::to_string(size));
+        };
+        queries.pipeline_barrier = cmd_barrier;
+        queries.query_pool = [&](QueryHeapId) { return &heap; };
+        const auto targets = [&](ResourceId id) -> const ResourceBinding* { return id == 10 ? &target : nullptr; };
+        graphics.geometry = geometry;
+        Draw quads = draw;
+        quads.indexed = false;  // no expansion: the query stays one segment and is resolved by a plain copy
+        reset();
+        CommandList list;
+        ok &= check(list.begin_query({6, d3d12_query::pipeline_statistics, 0}) && list.draw(quads) &&
+                        list.end_query({6, d3d12_query::pipeline_statistics, 0}) &&
+                        list.resolve_queries({6, d3d12_query::pipeline_statistics, 0, 1, 10, 0}) && list.close(),
+                    "record a resolved statistics query around a draw");
+        PreparedList prepared;
+        QueryReplay plan;
+        ok &= check(prepare(list, targets, queries, prepared) == ReplayResult::success &&
+                        plan.plan(prepared) == ReplayResult::success,
+                    "prepare and plan the statistics query");
+        emit(prepared, VK_NULL_HANDLE, queries);
+        plan.commit();
+        std::vector<std::string> want{"begin_query 0", "begin_rendering", "bind_graphics", "draw_indexed",
+                                      "end_rendering", "end_query 0",     "copy_query"};
+        if (!geometry) want.insert(want.end(), {"barrier", "fill 24+16"});
+        ok &= check(events == want, geometry ? "a geometry-shader draw keeps the query's GS counters"
+                                             : "without a geometry-shader draw the GS counters are zeroed after the copy");
+        ok &= check(geometry || barriers == std::vector{Barrier{VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                                VK_ACCESS_TRANSFER_WRITE_BIT,
+                                                                VK_ACCESS_TRANSFER_WRITE_BIT}},
+                    "the zeros are ordered after the copy");
+        ok &= check(heap.no_geometry.count(0) == (geometry ? 0u : 1u), "the heap keeps whether to zero them");
+
+        // A later list resolves the same query from the heap.
+        reset();
+        CommandList later;
+        PreparedList again;
+        QueryReplay later_plan;
+        ok &= check(later.resolve_queries({6, d3d12_query::pipeline_statistics, 0, 1, 10, 0}) && later.close() &&
+                        prepare(later, targets, queries, again) == ReplayResult::success &&
+                        later_plan.plan(again) == ReplayResult::success,
+                    "resolve the statistics query in a later list");
+        emit(again, VK_NULL_HANDLE, queries);
+        want = {"copy_query"};
+        if (!geometry) want.insert(want.end(), {"barrier", "fill 24+16"});
+        ok &= check(events == want, "a later resolve zeroes the same counters");
+    }
+    graphics.geometry = false;
     return ok ? 0 : 1;
 }

@@ -3858,6 +3858,21 @@ Implemented (`QueryHeap` in `runtime/shims/d3d12_vulkan_device.cpp`, the query c
   when it is split). The count is not D3D12's number: Vulkan counts a primitive the mesh shader culled with
   `gl_CullPrimitiveEXT`, which D3D12 does not count, so a mesh segment's `CInvocations` can be higher than D3D12's.
   Without the feature the field reads 0, as in D3D-291.
+- **Geometry-shader counters without a geometry shader** (RT-PIPESTATS-NGG-GS-ZERO). D3D12 counts `GSInvocations`
+  and `GSPrimitives` only for a geometry shader of the application's, but AMD's NGG path counts `GSInvocations` for
+  draws that have none: one per triangle on the Radeon 610M (RDNA2, AMD Windows driver), where `d3d12_mesh` read 2
+  for its two vertex-only triangles (and `GSPrimitives` 0), and the same on an RX 6700 XT with RADV, where
+  `RADV_DEBUG=nongg` gives 0 (the investigation in issue #1608, comment 7171688140). The NVIDIA RTX 5080 reads 0.
+  So `prepare()` counts the draws whose PSO has the application's geometry shader (`GraphicsPipeline::geometry`;
+  the generated rectangle-list stage does not count), and a statistics query with none of them between its Begin
+  and End resolves those two fields to 0: `emit_query` fills them with `vkCmdFillBuffer` after the copy or sum,
+  behind a transfer-to-transfer barrier. The heap keeps the choice (`QueryPool::no_geometry`) for a resolve in a
+  later list, as it keeps `ended`. A query that holds a draw with a geometry shader keeps the driver's counts, NGG's
+  extra ones for its other draws included; splitting statistics around those draws, as around mesh draws, is what
+  remains. `HSInvocations` and `DSInvocations` are the driver's, as hull and domain shaders are refused.
+  `d3d12_geometry_test` resolves a query around a GS draw (GSInvocations above 0) and one around a draw without a
+  GS (both fields 0), `d3d12_mesh_test` checks all three of its queries for 0, and `replay_quad_list_test` checks
+  the fill, its barrier and the heap state without a GPU.
 - **Timestamps.** `GetTimestampFrequency` is `1e9 / timestampPeriod` (1 GHz on the test GPU). Every D3D12 queue
   shares one `VkQueue` for now (question 12), so they share one frequency.
 - **Timestamp resolves on MoltenVK.** On Apple GPUs, MoltenVK delays every `vkCmdWriteTimestamp` to the end of

@@ -7,7 +7,10 @@
 // The PS entry asks for a 32-wide subgroup, so with a GS the third stage's required-size struct is filled too (the
 // recipe keeps one per stage; a two-entry array overflowed here, found by @0xTehuti on #2109).
 // Also refused: a GS pipeline whose topology type is not the GS's input primitive (lines: E_INVALIDARG). Skipped where
-// the GPU lacks geometryShader. Shaders: test/glsl/vs_draw.vert, gs_double.geom, ps_draw.frag. No game data.
+// the GPU lacks geometryShader. Where it has pipelineStatisticsQuery, a statistics query around each draw: the GS
+// draw counts GS invocations, the other reads 0 GSInvocations and GSPrimitives as in D3D12, although AMD's NGG path
+// counts GS invocations for it (RT-PIPESTATS-NGG-GS-ZERO).
+// Shaders: test/glsl/vs_draw.vert, gs_double.geom, ps_draw.frag. No game data.
 // Set LEONIDA_VK_VALIDATION=1 to run under VK_LAYER_KHRONOS_validation.
 #include "vk_test_device.h"
 #include "d3d12_test_shaders.h"
@@ -75,6 +78,8 @@ int main() {
 
     constexpr UINT size = 64;
     std::vector<std::uint8_t> pixels(size * 256);
+    D3D12_QUERY_DATA_PIPELINE_STATISTICS counts[2]{};  // the GS draw, the draw without a GS
+    bool counted = false;
     {
         rt::d3d12::VulkanDeviceInfo info{};
         info.get_instance_proc = d.instance_proc;
@@ -86,6 +91,7 @@ int main() {
         info.buffer_device_address = true;
         info.features = d.enabled;
         info.subgroup = d.subgroup;
+        info.pipeline_statistics_query = d.pipeline_statistics_query;
         info.shader_dir = library.string();
         ID3D12Device* inner = nullptr;
         EXPECT(SUCCEEDED(rt::d3d12::create_vulkan_device(info, IID_PPV_ARGS(&inner))));
@@ -161,6 +167,17 @@ int main() {
         EXPECT(SUCCEEDED(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &rt_desc,
                                                          D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
                                                          IID_PPV_ARGS(&target.p))));
+        Ref<ID3D12QueryHeap> statistics;
+        Ref<ID3D12Resource> statistics_results;
+        if (d.pipeline_statistics_query) {
+            const D3D12_QUERY_HEAP_DESC statistics_desc{D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS, 2, 0};
+            EXPECT(SUCCEEDED(device->CreateQueryHeap(&statistics_desc, IID_PPV_ARGS(&statistics.p))));
+            const auto results_desc = buffer_desc(sizeof(counts));
+            EXPECT(SUCCEEDED(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &results_desc,
+                                                             D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                             IID_PPV_ARGS(&statistics_results.p))));
+        }
+        constexpr auto statistics_query = D3D12_QUERY_TYPE_PIPELINE_STATISTICS;
         std::uint8_t* up = nullptr;
         EXPECT(SUCCEEDED(upload->Map(0, nullptr, reinterpret_cast<void**>(&up))));
         std::memcpy(up, vertices, sizeof(vertices));
@@ -203,11 +220,18 @@ int main() {
         const float top_left[2] = {0, 0}, bottom_left[2] = {0, -1};
         list->SetGraphicsRootConstantBufferView(1, upload_va + 512);  // red
         list->SetGraphicsRoot32BitConstants(0, 2, top_left, 0);
+        if (statistics.p) list->BeginQuery(statistics.p, statistics_query, 0);
         list->DrawIndexedInstanced(6, 1, 0, 0, 0);  // GS: top-left and its copy top-right
+        if (statistics.p) list->EndQuery(statistics.p, statistics_query, 0);
         list->SetPipelineState(plain.p);
         list->SetGraphicsRootConstantBufferView(1, upload_va + 768);  // green
         list->SetGraphicsRoot32BitConstants(0, 2, bottom_left, 0);
+        if (statistics.p) list->BeginQuery(statistics.p, statistics_query, 1);
         list->DrawIndexedInstanced(6, 1, 0, 0, 0);  // no GS: bottom-left only
+        if (statistics.p) {
+            list->EndQuery(statistics.p, statistics_query, 1);
+            list->ResolveQueryData(statistics.p, statistics_query, 0, 2, statistics_results.p, 0);
+        }
 
         D3D12_RESOURCE_BARRIER to_copy = transition(target.p, D3D12_RESOURCE_STATE_RENDER_TARGET,
                                                     D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -229,8 +253,16 @@ int main() {
         void* mapped = nullptr;
         EXPECT(SUCCEEDED(readback->Map(0, nullptr, &mapped)));
         std::memcpy(pixels.data(), mapped, pixels.size());
+        if (statistics.p) {
+            void* counts_mapped = nullptr;
+            EXPECT(SUCCEEDED(statistics_results->Map(0, nullptr, &counts_mapped)));
+            std::memcpy(counts, counts_mapped, sizeof(counts));
+            statistics_results->Unmap(0, nullptr);
+            counted = true;
+        }
 
-        for (auto* r : {&upload, &readback, &target}) r->reset();
+        for (auto* r : {&upload, &readback, &target, &statistics_results}) r->reset();
+        statistics.reset();
         plain.reset();
         doubled.reset();
         root.reset();
@@ -258,6 +290,21 @@ int main() {
         }
     }
     EXPECT(!mismatches);
+    if (counted) {
+        const auto& gs = counts[0];
+        const auto& no_gs = counts[1];
+        std::printf("statistics, GS draw: IA %llu/%llu VS %llu GS %llu/%llu C %llu/%llu PS %llu; draw without a GS: "
+                    "IA %llu/%llu VS %llu GS %llu/%llu C %llu/%llu PS %llu\n",
+                    gs.IAVertices, gs.IAPrimitives, gs.VSInvocations, gs.GSInvocations, gs.GSPrimitives,
+                    gs.CInvocations, gs.CPrimitives, gs.PSInvocations, no_gs.IAVertices, no_gs.IAPrimitives,
+                    no_gs.VSInvocations, no_gs.GSInvocations, no_gs.GSPrimitives, no_gs.CInvocations,
+                    no_gs.CPrimitives, no_gs.PSInvocations);
+        EXPECT(gs.IAVertices == 6 && gs.IAPrimitives == 2 && no_gs.IAVertices == 6 && no_gs.IAPrimitives == 2);
+        EXPECT(gs.GSInvocations > 0);  // the layer keeps the counts of a query with a GS draw
+        EXPECT(no_gs.GSInvocations == 0 && no_gs.GSPrimitives == 0);
+    } else {
+        std::printf("pipelineStatisticsQuery not available: the statistics check is skipped\n");
+    }
     if (d.validation_errors()) {
         std::fprintf(stderr, "%u validation errors\n", d.validation_errors());
         return 1;

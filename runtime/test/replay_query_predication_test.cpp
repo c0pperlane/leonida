@@ -113,6 +113,10 @@ int main() {
     ReplayFunctions vk{};
     vk.begin_conditional_rendering = mock_begin_cond;
     vk.end_conditional_rendering = mock_end_cond;
+    // Orders the zeros a statistics resolve writes to GSInvocations and GSPrimitives (RT-PIPESTATS-NGG-GS-ZERO).
+    vk.pipeline_barrier = +[](VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags,
+                              std::uint32_t, const VkMemoryBarrier*, std::uint32_t, const VkBufferMemoryBarrier*,
+                              std::uint32_t, const VkImageMemoryBarrier*) {};
     vk.prepare_predicate = [](VkBuffer source, VkDeviceSize offset, PredicateCapture& out) {
         out = {source, offset, handle<VkBuffer>(4), 0, handle<VkDescriptorSet>(5)};
         return true;
@@ -252,8 +256,9 @@ int main() {
         expect(queries.needs_binary && queries.needs_statistics_sum, "split list: binary and statistics helpers");
         emit(prepared, VK_NULL_HANDLE, vk);
         queries.commit();
+        // The query held no draw of a geometry shader: its GS counters are zeroed after the sum.
         const std::vector<std::string> want{"begin_query 9:4", "end_query 9:4",  "binary",
-                                            "begin_query 9:5", "end_query 9:5", "sum_statistics 9:4+2"};
+                                            "begin_query 9:5", "end_query 9:5", "sum_statistics 9:4+2", "fill"};
         expect(trace.events == want, "split list: segments end before and begin after the helper dispatch");
         expect(statistics_heap.occlusion.count(0) && statistics_heap.occlusion[0].count == 2,
                "split list: the heap keeps the query's segments for later resolves");
@@ -355,7 +360,7 @@ int main() {
         want.insert(want.end(), conversion.begin(), conversion.end());
         if (upload) want.push_back("upload");
         const std::vector<std::string> tail{
-            "end_query 9:8", "end_cond", "sum_statistics 9:4+5", "begin_cond", "end_cond"};
+            "end_query 9:8", "end_cond", "sum_statistics 9:4+5", "fill", "begin_cond", "end_cond"};
         want.insert(want.end(), tail.begin(), tail.end());
         expect(trace.events == want, "mixed helpers: exact segment and conditional scope order");
 
@@ -410,8 +415,8 @@ int main() {
         queries.commit();
         const std::vector<std::string> want{"begin_query 9:4",      "end_query 9:4",       "begin_query 9:5",
                                             "end_query 9:5",        "begin_query 9:6",     "end_query 9:6",
-                                            "sum_statistics 9:4+2", "begin_query 9:7",     "end_query 9:7",
-                                            "sum_statistics 9:5+3"};
+                                            "sum_statistics 9:4+2", "fill",                "begin_query 9:7",
+                                            "end_query 9:7",        "sum_statistics 9:5+3", "fill"};
         expect(trace.events == want, "overlap statistics: one open segment per event, resolves sum the ranges");
         expect(statistics_heap.occlusion.count(0) && statistics_heap.occlusion[0].count == 2 &&
                    statistics_heap.occlusion.count(1) && statistics_heap.occlusion[1].count == 3,
@@ -550,7 +555,7 @@ int main() {
         const std::vector<std::string> want{
             "begin_query 9:4", "end_query 9:4", "begin_query 9:5", "end_query 9:5", "begin_query 9:6",
             "readback",        "end_query 9:6", "footprint",       "footprint",     "begin_query 9:7",
-            "end_query 9:7",   "sum_statistics 9:4+2", "sum_statistics 9:5+3"};
+            "end_query 9:7",   "sum_statistics 9:4+2", "fill",          "sum_statistics 9:5+3", "fill"};
         expect(trace.events == want, "overlap helpers: the dispatches run outside every open segment");
         expect(statistics_heap.occlusion.count(0) && statistics_heap.occlusion[0].count == 2 &&
                    statistics_heap.occlusion.count(1) && statistics_heap.occlusion[1].count == 3,

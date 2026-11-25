@@ -8522,6 +8522,8 @@ public:
         const auto topology_bits = std::bit_cast<std::uint32_t>(desc.PrimitiveTopologyType);
         if (!mesh && topology_bits != leonida::topology_type_rect_list)
             graphics_.rectangle_variant_topology = leonida::topology_rect_list;
+        // Only the application's geometry shader counts in GSInvocations and GSPrimitives (RT-PIPESTATS-NGG-GS-ZERO).
+        graphics_.geometry = geometry;
 
         std::uint64_t spirv_bytes = 0;
         for (Stage& stage : stages) {
