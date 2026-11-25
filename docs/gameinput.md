@@ -429,6 +429,8 @@ holds stays valid after it leaves the history.
 - With a device the search covers that pad; with none, every connected pad. Readings of different pads are ordered by
   when the shim took them, not by timestamp, since pads polled together share one.
 - `GetNextReading` returns the first reading after the reference, `GetPreviousReading` the last one before it.
+- A kind mask skips readings that carry none of its kinds, so a `GameInputKindMotion` or
+  `GameInputKindRawDeviceReport` step passes over the readings a pad took before its first sensor sample or report.
 - The horizon is the newest reading dropped from the histories searched (with no device, the reference's pad counts
   too, even unplugged). A step that would cross it fails rather than skip input.
 

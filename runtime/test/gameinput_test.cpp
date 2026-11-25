@@ -667,8 +667,7 @@ void test_motion(IGameInput* input) {
           "motion: GetPreviousReading with a Motion filter returns only Motion readings or READING_NOT_FOUND");
     if (motion_prev) motion_prev->Release();
 
-    // Both traversal directions and the device filter must apply the same kind predicate. sennecools verified
-    // these two paths locally against this head; pin them so a future regression is caught by the committed test.
+    // Both traversal directions and the device filter apply the same kind predicate.
     IGameInputReading* motion_prev_dev = nullptr;
     const HRESULT phd = input->GetPreviousReading(r, GameInputKindMotion, mdev, &motion_prev_dev);
     check(phd == GAMEINPUT_E_READING_NOT_FOUND && !motion_prev_dev,

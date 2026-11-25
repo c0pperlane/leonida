@@ -2393,8 +2393,8 @@ HRESULT find_reading(IGameInputReading* ref, uint32_t kind, IGameInputDevice* de
     for (Device* d : scope)
         for (Reading* c : d->history) {
             const bool beyond = forward ? c->order() > r->order() : c->order() < r->order() && c->order() > horizon;
-            // A device may advertise Motion/RawDeviceReport before its readings carry that kind (see #5053).
-            // A history walk must skip those readings, or a Motion/Raw query can return one without the data.
+            // A history walk skips readings without the requested kind (see reading_matches), or a Motion or raw
+            // query could return one without the data.
             if (beyond && reading_matches(c, kind) &&
                 (!best || (c->order() < best->order()) == forward)) best = c;  // the nearest one
         }
@@ -2444,8 +2444,9 @@ public:
                 if (d->status == GameInputDeviceNoStatus) return GAMEINPUT_E_DEVICE_DISCONNECTED;
                 if (kind != GameInputKindUnknown && !(kind & d->info.supportedInput))
                     return GAMEINPUT_E_READING_NOT_FOUND;  // the device does not do this kind (motion on a plain pad)
+                if (Reading* r = d->latest(); r && !reading_matches(r, kind))
+                    return GAMEINPUT_E_READING_NOT_FOUND;  // it does, but no sample or report has arrived yet
                 best = d->latest();
-                if (best && !reading_matches(best, kind)) best = nullptr;  // advertised, but no sample/report yet
             }
         } else {
             for (Device* d : g().connected)  // the most recent reading that carries the requested kind
