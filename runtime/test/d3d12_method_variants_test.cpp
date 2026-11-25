@@ -6,6 +6,8 @@
 // section 7). The newer arguments' edge cases are checked against the PC runtime's answers, live when the host has
 // a D3D12 device. A texture from CreateCommittedResource3 goes through an upload, a copy and a readback on a queue
 // from CreateCommandQueue1. No shaders or game data. Set LEONIDA_VK_VALIDATION=1 to run under VK_LAYER_KHRONOS_validation; any validation error fails.
+// Set LEONIDA_TEST_HOST_NO_RELAXED_CASTING=1 to treat the host as one without relaxed format casting, which runs the
+// not-comparable path of the castable-list cases on a host that has the feature.
 #include "vk_test_device.h"
 #include "host_wine.h"
 #include "../shims/d3d12_com.h"
@@ -553,7 +555,15 @@ int main() {
             // refuses even a list of the resource's own format). The layer reports the feature, so those cases are
             // checked against their recorded answers only on such a host.
             D3D12_FEATURE_DATA_D3D12_OPTIONS12 host12{};
-            const bool host_casts = SUCCEEDED(host->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &host12,
+            char no_casting[2] = {};
+            const bool treat_as_no_casting =
+                GetEnvironmentVariableA("LEONIDA_TEST_HOST_NO_RELAXED_CASTING", no_casting, sizeof(no_casting)) == 1 &&
+                no_casting[0] == '1';
+            if (treat_as_no_casting)
+                std::printf("LEONIDA_TEST_HOST_NO_RELAXED_CASTING=1: the host is treated as without relaxed format "
+                            "casting\n");
+            const bool host_casts = !treat_as_no_casting &&
+                                    SUCCEEDED(host->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &host12,
                                                                         sizeof(host12))) &&
                                     host12.RelaxedFormatCastingSupported;
             const std::vector<Edge> theirs = edge_answers(host.p, host.p, host.p);
