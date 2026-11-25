@@ -3,6 +3,7 @@
 //   vk_sandbox <scene.bin> <vs.spv> <ps.spv> --out <image.ppm> [--size W H] [--cam x y z yaw pitch] [--fov deg]
 //   vk_sandbox <scene.bin> <vs.spv> <ps.spv> --window [--size W H] [--cam ...] [--mode fly|walk|drive]   (Windows only)
 //   --window --frames N --out <image.ppm>: test run, the window shows without activation and quits after N frames
+//   vk_sandbox --self-test-ground-bounds: CPU-only check of the walk/drive ground grid on a synthetic scene (ctest)
 //
 // The pair (chosen by tools/sandbox.py) is a transform VS with POSITION/NORMAL/TEXCOORD inputs and a textured PS, both reading user SGPR 8:
 // a 32-bit pointer (high dword forced to 0) to one table of descriptors in the heap, laid out as the shaders load it:
