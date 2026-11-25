@@ -9,9 +9,10 @@ hand-written RDNA2 run through the translator in `d3d12_translated_draw_test`, a
 `d3d12_m2_textured_test`. `D3D12XboxCreateDevice` uses it when `LEONIDA_D3D12=vulkan` is
 set and the host PC device otherwise. Root signatures (packed into the 32 user-data dwords), graphics and compute
 PSOs, draws, dispatches, `ExecuteIndirect`, and presentation through `PresentX` or a DXGI swapchain are implemented
-and have GPU tests; which present path the game uses is still open (question 6). Shader-resource views of buffers,
-pipeline-state streams (`CreatePipelineState`), tessellation and stream-output pipelines are not implemented, and
-mesh shaders are reported as not supported (stream PSOs and mesh shaders: D3D-29, #1712). The device reports
+and have GPU tests; which present path the game uses is still open (question 6). Shader-resource views of buffers
+are implemented, and so are pipeline-state streams (`CreatePipelineState`) and mesh PSOs with `DispatchMesh`
+(D3D-29, section 3.6); `MeshShaderTier` is 1 only where the GPU has `VK_EXT_mesh_shader`. Tessellation,
+stream-output and amplification-shader pipelines are not implemented. The device reports
 `RaytracingTier` as `NOT_SUPPORTED`, yet `BuildRaytracingAccelerationStructure` builds XDXR BVH4 structures on the
 GPU (section 4.8).** This is the plan for
 replacing the console's `d3d12_xs.dll` with an implementation that records D3D12 commands and replays them on
@@ -1221,8 +1222,9 @@ and any validation error fails them.
 - `vk_command_replay_test`, part I: a 4x D32 `MIN` resolve of a rectangle; the texels around it must keep the
   destination's clear value (MoltenVK overwrote all 28 of them before the scratch copy). It is skipped where the
   device has no `MIN` depth resolve (llvmpipe), and without `copy_scratch` the list is refused.
-- `d3d12_vulkan_device_test` also runs both atomic copies and the discards through COM, and checks that
-  `WriteBufferImmediate` is refused at execution while no buffer has a GPU virtual address on `main`.
+- `d3d12_vulkan_device_test` also runs both atomic copies and the discards through COM, checks that a
+  `WriteBufferImmediate` to an address no buffer holds is refused at execution (`unresolved_resource`), and writes
+  a word at a placed buffer's VA and reads it back.
 - `vk_bindless_test` (run by `runtime/test/shaders/check.py` and `scripts/run_gpu_tests.py`): the translator's
   own lookup against the table and the set. `ps_tex.asm`, a hand-written RDNA2 pixel shader built by `build.py`,
   loads a T# and an S# from a descriptor table and samples. The test draws the gradient with the T# at the fourth
@@ -3038,9 +3040,10 @@ The console has two list topologies Vulkan lacks: rectangle list (`IASetPrimitiv
   `buffer_offset + (address - va)`. `VulkanContext` finds it by binary search over the buffers' VA ranges
   (`runtime/src/buffer_va_index.h`, kept in step with the registered resources); aliasing placed buffers can
   overlap: the one whose range starts closest below the address and also holds the bytes the view or write needs
-  wins, or, when none holds all of them, the one that starts closest below (`buffer_va_index_test`). These are the same fields and lookup as #291's arena, and the device fills
-  `va` once `GetGPUVirtualAddress` lands (#157/#291); until then, a list with an immediate write is refused as
-  `unresolved_resource`. `DEFAULT` adds no barrier: it is ordered like any copy, by the application's barriers.
+  wins, or, when none holds all of them, the one that starts closest below (`buffer_va_index_test`). The device
+  fills `va` with the buffer's console VA, the one `GetGPUVirtualAddress` answers (section 3.3); a list with an
+  immediate write whose 4 bytes no buffer holds is refused as `unresolved_resource`. `DEFAULT` adds no barrier: it
+  is ordered like any copy, by the application's barriers.
   `MARKER_OUT` waits for every earlier command to finish and sees its writes (`ALL_COMMANDS`/`MEMORY_WRITE` →
   `TRANSFER`/`TRANSFER_WRITE`). `MARKER_IN` only needs earlier commands to have started. Vulkan cannot express
   that, because `TOP_OF_PIPE` in a first synchronisation scope is no stage at all, so it gets an execution-only
@@ -3892,14 +3895,9 @@ statistics list and case 10's occlusion pair (no GPU).
 
 Not implemented yet:
 
-- **Overlapping queries in the single-list `replay()` helper.** It has no segment pool, so a list whose occlusion
-  kinds or statistics queries overlap each other is refused there with `ReplayResult::unsupported`; the batched
-  path above replays them.
 - Mesh-shader statistics (`PIPELINE_STATISTICS1`, D3D-132), and stream-output statistics that count real
   primitives (they wait for stream output itself). (`GetClockCalibration` is implemented: see section 4.4,
   "Fences, queues and frames in flight".)
-- Stream-output and mesh-shader statistics. (`GetClockCalibration` is implemented: see section 4.4, "Fences,
-  queues and frames in flight".)
 - Xbox-specific query heap types (if any) are **Open**; unknown types are logged.
 
 ### 4.7 Indirect commands and command signatures

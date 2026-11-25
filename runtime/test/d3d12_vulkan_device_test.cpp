@@ -6386,8 +6386,8 @@ int main() {
             queue->ExecuteCommandLists(1, lists);
             EXPECT(rt::d3d12::last_execute_result(queue.p) == leonida::ReplayResult::invalid_subresource);
 
-            // Nothing on main gives a buffer a GPU virtual address yet (GetGPUVirtualAddress, #157/#291), so an
-            // immediate write has no target: the list is refused and nothing is submitted.
+            // No buffer holds VA 0x10000 (the GPU address arena hands out offsets from kArenaReserved up), so the
+            // immediate write has no target: the list is refused at execution.
             EXPECT(SUCCEEDED(list->Reset(allocator.p, nullptr)));
             const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER write{0x10000, 1};
             const D3D12_WRITEBUFFERIMMEDIATE_MODE mode = D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT;
