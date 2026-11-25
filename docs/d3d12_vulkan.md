@@ -1365,8 +1365,9 @@ and any validation error fails them.
     descriptor is opaque). It also runs an upload and readback under a `SetPredication` that skips copies, which the
     layer must still convert and which is compared with the host's unpredicated run. `depth24_convert_test` runs the
     compute pass on the GPU for all 16777216 words (to float, and back), 16777216 float bit patterns against
-    `depth24_quantize` (with a 1 MiB range so the copy splits into 65 dispatches), and a pitched copy at an offset
-    split by a 1 KiB range. It tests the pass, which needs no D24 absence, on whatever device
+    `depth24_quantize` (with a 1 MiB range so the copy splits into 65 dispatches), a pitched copy at an offset
+    split by a 1 KiB range, and an in-place job both ways (the D16S8 UAV made as D24S8, section 4.2). It tests the
+    pass, which needs no D24 absence, on whatever device
     `VK_LOADER_DRIVERS_SELECT` picks; the layer's own D24 path (the D3D12 tests above) is used only on a GPU without
     D24 depth-attachment support, so run those with the AMD driver selected (the Radeon 880M, RADV).
 - `d3d12_translated_draw_test`: milestone M1.5 (D3D-53), the same path with translator output.
@@ -2996,14 +2997,30 @@ The console has two list topologies Vulkan lacks: rectangle list (`IASetPrimitiv
   Where the provider (`Resource::enable_depth_stencil_uav`) has no unordered-access form of a texture it answers
   `E_INVALIDARG` or `E_NOTIMPL`, and slots 76 and 133 then make the texture without unordered access, as before the
   provider: slot 76 as a committed depth-stencil texture, slot 133 through its stand-in (the title-placed texture, or
-  the committed one). The first such refusal per slot is logged. That is the console D16S8 format (118) on a GPU with
-  D24S8 attachments (every NVIDIA card): `pc_format()` makes it as `D24_UNORM_S8_UINT`, which the provider does not
-  take; a real boot stopped on an int3 after slot 133 returned that refusal. Its UAVs then write no
-  descriptor, as for the slot 25 stand-in. Any other failure (out of memory, the backing itself, a refused placement)
-  is passed on as before. Follow-up: teach `enable_depth_stencil_uav` the D24S8-made form of format 118 (its widened
-  path already serves a D16S8 target stored as `D32_SFLOAT_S8_UINT`), so these textures keep their UAVs on NVIDIA
-  too. `xs_proxy_mock` checks the refusal against a mock provider, and `xbox_d16s8_refused_uav` on a GPU with
-  `LEONIDA_CONSOLE_D16S8=d24`.
+  the committed one). The first such refusal per slot is logged. That was the console D16S8 format (118) on a GPU with
+  D24S8 attachments (every NVIDIA card), which `pc_format()` makes as `D24_UNORM_S8_UINT`, until the provider took that
+  form (below); a real boot had stopped on an int3 after slot 133 returned the refusal. A widened D16S8 target on a
+  GPU that cannot blit `R16_UNORM` and `R32_FLOAT` is still refused. A refused texture's UAVs write no descriptor, as
+  for the slot 25 stand-in. Any other failure (out of memory, the backing itself, a refused placement) is passed on as
+  before. `xs_proxy_mock` checks the refusal against a mock provider.
+  - **D16S8 made as D24S8.** The proxy hands the provider only `R16_TYPELESS`, `R32G8X24_TYPELESS` and 118
+    (`depth_uav_description`), so a `D24_UNORM_S8_UINT` texture there is 118 that `pc_format()` made as D24S8. It gets
+    the planes of a D16S8 target stored as `D32_SFLOAT_S8_UINT` (the widened form): an `R16_TYPELESS` depth plane
+    (viewed as `R16_UINT` or `R16_UNORM`), an `R8_UINT` stencil plane, and an `R32_FLOAT` transfer image that the depth
+    plane is blitted from and to (the blit gives the nearest 16-bit UNORM of the float, and the float of one). Stored
+    as D32, the depth aspect copies into the transfer image as its float bits. Made as D24, it copies as 24-bit words
+    into the depth24 pass's scratch, and the pass (`depth24_convert.comp`, an in-place `Depth24Job`) turns each into
+    the nearest float of `d / 16777215` where it lies, which a copy then moves into the transfer image; the other way,
+    the pass quantises the floats into words as a D24 readback does, and the words are copied into the depth aspect.
+    The pass is a helper dispatch, as for a footprint copy: outside the counters of a pipeline-statistics query, and
+    run whatever a predicate says. A D16 value `u` goes into D24 and back unchanged: its D24 word lies within a step
+    or two of `256u + u/257`, and a D24 step is 1/256 of a D16 one. A D24 value between two D16 values reads as the
+    nearer, as the blit rounds. A D24 stored as D32 (only when `LEONIDA_CONSOLE_D16S8=d24` asks for D24 on a GPU
+    without D24 attachments) takes the D32 form: what a UAV writes reaches the depth aspect as the float of `u / 65535`,
+    not a value of the 24-bit grid. `xbox_d16s8_d24_storage` (`LEONIDA_CONSOLE_D16S8=d24`) makes the texture through
+    slots 76 and 133 with its unordered access, then clears depth and stencil, clears rectangles through the UAV,
+    and reads back the depth image's own words and the planes: exact on an RTX 5080 (native D24) and a Radeon 610M
+    (D24 stored as D32), with `LEONIDA_VK_VALIDATION=1` too.
 - Legacy and enhanced texture transitions copy the selected planes and layers to or from their storage images.
   Fence-ordered graphics and compute queues can share UAV access. A dedicated compute family can perform
   the plane transfer itself when `VK_KHR_maintenance10` and the format's depth/stencil copy flags allow it.

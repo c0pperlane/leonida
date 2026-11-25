@@ -7,7 +7,7 @@
 //      specials: zeros, denormals, NaNs, infinities, negatives, 1.0 and its neighbours), readback direction, against
 //      depth24_quantize;
 //   4. a pitched copy (row and slice strides larger than the extent, an offset into the buffer): only the texels of
-//      the region change, to the right values.
+//      the region change, to the right values; and an in-place job (one region of the scratch, both directions).
 // The pass is tested on the device the Vulkan loader picks (VK_LOADER_DRIVERS_SELECT='*amd*' or '*nv*'); it needs no
 // GPU without D24. Steps 3 and 4 use converters with a 1 MiB and a 1 KiB storage range, so copies split into dispatches.
 // Set LEONIDA_VK_VALIDATION=1 to run under VK_LAYER_KHRONOS_validation; any validation error fails the test.
@@ -223,6 +223,50 @@ int main() {
                     EXPECT(scratch_words[(z * h + y) * w + x] == as_bits(depth24_to_float(d)));
                 }
         std::printf("depth24: a pitched copy at an offset touches only its texels\n");
+    }
+
+    // 4b. In place (Depth24Job::in_place, the D16S8 made as D24S8): the words and the floats share one region of the
+    //     scratch, converted where they lie, both ways and in parts; nothing outside the region changes.
+    {
+        constexpr std::uint32_t w = 37, h = 5, s = 3, base = 256;  // base: the region's first word in `scratch`
+        const auto in_place = [&](bool to_float) {
+            Depth24Job job;
+            job.in_place = true;
+            job.to_float = to_float;
+            job.width = w;
+            job.height = h;
+            job.slices = s;
+            job.scratch = scratch;
+            job.scratch_offset = base * 4;
+            std::vector<Depth24Job> parts;
+            if (!tiny.prepare(job, parts) || job.app != scratch || job.app_offset != base * 4) return false;
+            last_parts = parts.size();
+            return gpu.run([&](VkCommandBuffer command_buffer) {
+                for (const auto& part : parts) converter.run(command_buffer, part);
+                VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                host.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                gpu.fn<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                                                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host, 0, nullptr,
+                                                                         0, nullptr);
+                return true;
+            });
+        };
+        const auto d = [](std::uint32_t i) { return (i * 2654435761u) & 0xffffffu; };
+        std::memset(scratch_words, 0xcd, 4096 * 4);
+        for (std::uint32_t i = 0; i < w * h * s; ++i) scratch_words[base + i] = d(i) | (0x5au << 24);
+        EXPECT(in_place(true));
+        EXPECT(last_parts == s);  // 1 KiB holds one slice of 37x5 words, not two
+        for (std::uint32_t i = 0; i < 4096; ++i) {
+            const bool inside = i >= base && i < base + w * h * s;
+            EXPECT(scratch_words[i] == (inside ? as_bits(depth24_to_float(d(i - base))) : 0xcdcdcdcdu));
+        }
+        EXPECT(in_place(false));
+        for (std::uint32_t i = 0; i < 4096; ++i) {
+            const bool inside = i >= base && i < base + w * h * s;
+            EXPECT(scratch_words[i] == (inside ? d(i - base) : 0xcdcdcdcdu));
+        }
+        std::printf("depth24: in place, %u words become floats and return where they lie\n", w * h * s);
     }
 
     // 5. Concurrent VulkanQueue::execute() with enable_depth24 active: one queue runs depth24_as_float

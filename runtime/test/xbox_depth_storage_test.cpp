@@ -5,6 +5,7 @@
 #include "../src/title_va_alias.h"
 #include <array>
 #include <cstdio>
+#include <cstring>
 
 using namespace d3d12test;
 #define VERIFY(expr) do { if (!(expr)) { std::fprintf(stderr, "line %d: %s\n", __LINE__, #expr); return 1; } } while (0)
@@ -56,11 +57,11 @@ int check_lease(ID3D12Device* dev, ID3D12Device* xbox) {
 }
 
 // With the console D16S8 family made as D24S8 (LEONIDA_CONSOLE_D16S8=d24; the default on a GPU with D24S8
-// attachments, every NVIDIA card), the depth provider has no unordered-access form of a format 118 depth-stencil
-// texture and refuses it (Resource::enable_depth_stencil_uav). Slots 76 and 133 then make it without unordered
-// access, as before the provider, so the title gets its texture instead of asserting. The description is the one
-// measured where a real boot stopped: 1280x720, one mip, the all-ones layout through slot 133.
-int check_d16s8_refused_uav(ID3D12Device* xbox) {
+// attachments, every NVIDIA card), the depth provider gives a format 118 depth-stencil texture its unordered-access
+// planes too (Resource::enable_depth_stencil_uav: D24 words to and from the R16 plane through the depth24 pass), so
+// slots 76 and 133 make it with unordered access instead of falling back to a texture without it. The description is
+// the one measured where a real boot stopped: 1280x720, one mip, the all-ones layout through slot 133.
+int check_d16s8_d24_uav(ID3D12Device* xbox) {
     D3D12_RESOURCE_DESC tex{};
     tex.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     tex.Width = 1280;
@@ -80,7 +81,7 @@ int check_d16s8_refused_uav(ID3D12Device* xbox) {
     VERIFY(SUCCEEDED(reinterpret_cast<Create>(slot(xbox, 76))(xbox, &heap, 0, &tex, D3D12_RESOURCE_STATE_DEPTH_WRITE,
                                                                &clear, &__uuidof(ID3D12Resource),
                                                                reinterpret_cast<void**>(&committed.p))));
-    VERIFY(committed.p && committed->GetDesc().Flags == D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    VERIFY(committed.p && committed->GetDesc().Flags == tex.Flags);
 
     using Place = HRESULT(WINAPI*)(void*, UINT64, const D3D12_RESOURCE_DESC*, UINT, const D3D12_CLEAR_VALUE*,
                                    const IID*, void**);
@@ -91,11 +92,11 @@ int check_d16s8_refused_uav(ID3D12Device* xbox) {
     const HRESULT hr = reinterpret_cast<Place>(slot(xbox, 133))(xbox, reinterpret_cast<UINT64>(va), &tex, 0xFFFFFFFFu,
                                                                 &clear, &__uuidof(ID3D12Resource),
                                                                 reinterpret_cast<void**>(&placed.p));
-    const bool made = SUCCEEDED(hr) && placed.p && placed->GetDesc().Flags == D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-    placed = {};
+    const bool made = SUCCEEDED(hr) && placed.p && placed->GetDesc().Flags == tex.Flags;
+    placed.reset();
     VirtualFree(va, 0, MEM_RELEASE);
     VERIFY(made);
-    std::printf("Xbox D16S8 made as D24S8: slots 76 and 133 make the depth-stencil texture without unordered access\n");
+    std::printf("Xbox D16S8 made as D24S8: slots 76 and 133 make the depth-stencil texture with unordered access\n");
     return 0;
 }
 }
@@ -106,6 +107,9 @@ int main() {
     if (status == vktest::DeviceStatus::unavailable) return 77;
     VERIFY(status == vktest::DeviceStatus::ready);
     const bool with_stencil = std::getenv("LEONIDA_TEST_D16S8_UAV") != nullptr;
+    // The D16S8 family made as D24S8 (pc_format): the depth image holds 24-bit words, the UAV plane the D16 bits.
+    const char* family = std::getenv("LEONIDA_CONSOLE_D16S8");
+    const bool made_d24 = with_stencil && family && std::strcmp(family, "d24") == 0;
     constexpr auto xbox_d16s8 = static_cast<DXGI_FORMAT>(118);
     rt::d3d12::VulkanDeviceInfo info{};
     info.bindless = gpu.bindless;
@@ -140,11 +144,7 @@ int main() {
     VERIFY(SUCCEEDED(rt::d3d12_xs::create_device_proxy(dev, __uuidof(ID3D12Device),
                                                        reinterpret_cast<void**>(&proxy.p), true)));
     rt::d3d12::set_device_outer(dev, proxy.p);
-    if (std::getenv("LEONIDA_TEST_D16S8_REFUSED_UAV")) {
-        VERIFY(check_d16s8_refused_uav(proxy.p) == 0);
-        VERIFY(gpu.validation_errors() == 0);
-        return 0;
-    }
+    if (made_d24) VERIFY(check_d16s8_d24_uav(proxy.p) == 0);
     VERIFY(check_lease(dev, proxy.p) == 0);
     const auto allocation = dev->GetResourceAllocationInfo(0, 1, &tex);
     VERIFY(allocation.SizeInBytes >= 768u * 768 * layers * 2 && allocation.SizeInBytes != UINT64_MAX);
@@ -251,6 +251,30 @@ int main() {
         raw_stencil = inspected_plane(layers);
         VERIFY(raw_depth && raw_stencil && raw_depth != depth.p && raw_stencil != raw_depth);
     }
+    // Made as D24S8, the depth image itself is read as well, before the planes are: its 24-bit words must be the D16
+    // values the clears and the UAV wrote (the UAV writes reached the depth image), its stencil the cleared bytes.
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT words[2 * layers]{};
+    Ref<ID3D12Resource> parent_readback;
+    if (made_d24) {
+        auto d24 = tex;
+        d24.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        UINT64 parent_total{};
+        dev->GetCopyableFootprints(&d24, 0, 2 * layers, 0, words, nullptr, nullptr, &parent_total);
+        auto parent_buffer = buffer_desc(parent_total);
+        VERIFY(SUCCEEDED(dev->CreateCommittedResource(&host, D3D12_HEAP_FLAG_NONE, &parent_buffer,
+                                                      D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                      IID_PPV_ARGS(&parent_readback.p))));
+        auto read = transition(depth.p, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list->ResourceBarrier(1, &read);
+        for (UINT i = 0; i < 2 * layers; ++i) {
+            D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+            from.pResource = depth.p; from.SubresourceIndex = i;
+            to.pResource = parent_readback.p; to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; to.PlacedFootprint = words[i];
+            list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        }
+        std::swap(read.Transition.StateBefore, read.Transition.StateAfter);
+        list->ResourceBarrier(1, &read);
+    }
     auto ready = transition(depth.p, D3D12_RESOURCE_STATE_DEPTH_WRITE,
                              with_stencil ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COPY_SOURCE);
     list->ResourceBarrier(1, &ready);
@@ -286,6 +310,26 @@ int main() {
         std::printf("Xbox D16S8 depth and stencil: %u depth words and %u stencil bytes exact after UAV round trip\n", width*width*layers,width*width*layers);
     }
     readback->Unmap(0, nullptr);
+    if (made_d24) {
+        void* parent_mapped{};
+        VERIFY(SUCCEEDED(parent_readback->Map(0, nullptr, &parent_mapped)));
+        const auto* parent = static_cast<const std::uint8_t*>(parent_mapped);
+        for (UINT i = 0; i < layers; ++i) for (int y = 0; y < width; ++y) for (int x = 0; x < width; ++x) {
+            const auto word = *reinterpret_cast<const UINT*>(parent + words[i].Offset + y * words[i].Footprint.RowPitch + x * 4);
+            const UINT d16 = UINT((UINT64(word & 0xffffffu) * 65535 + 8388607) / 16777215);  // the nearest D16 value
+            const bool changed = i < layers-1 && x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+            const UINT expected = changed ? 0x8040u+i : original[i];
+            if (d16 != expected) {
+                std::fprintf(stderr, "D24 slice %u pixel (%d,%d) word %06x is D16 %04x, expected %04x\n", i, x, y,
+                             word & 0xffffffu, d16, expected);
+                return 1;
+            }
+            VERIFY(parent[words[layers+i].Offset + y*words[layers+i].Footprint.RowPitch + x] == 0x30+i);
+        }
+        parent_readback->Unmap(0, nullptr);
+        std::printf("Xbox D16S8 made as D24S8: the depth image holds what the clears and the UAV wrote, %u texels\n",
+                    width * width * layers);
+    }
     VERIFY(gpu.validation_errors() == 0);
     std::printf("Depth D16 / storage R16_UINT, six layers and %u exact texels\n", width * width * layers);
     return 0;

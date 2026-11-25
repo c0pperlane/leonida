@@ -119,7 +119,9 @@ struct ResourceBinding {
     ResourceId depth_uav = 0, stencil_uav = 0;
     void* residency_owner = nullptr;
     bool (*ensure_residency)(void*) = nullptr;
-    ResourceId depth_conversion = 0;  // R32_FLOAT transfer image for a widened Xbox D16+S8 attachment
+    // R32_FLOAT transfer image for a widened Xbox D16+S8 attachment (D32S8, or D24S8, whose depth words the depth24 pass
+    // turns into its floats and back)
+    ResourceId depth_conversion = 0;
     bool indirect_arguments = false;   // the backing VkBuffer was created with INDIRECT_BUFFER usage
 };
 
@@ -1319,7 +1321,8 @@ struct Prepared {
     VkRenderPass resolve_pass = VK_NULL_HANDLE;
     VkFramebuffer resolve_framebuffer = VK_NULL_HANDLE;
     bool has_depth24 = false;  // a depth plane copy of a depth24_as_float texture: convert through depth24
-                               // (or a copy of an rgb96 texture: repacked by the same pass)
+                               // (or a copy of an rgb96 texture: repacked by the same pass; or the D24 depth plane
+                               // of a D16S8 UAV transition, converted in place: copy_depth_uav)
     std::uint32_t rgb96_row_words = 0;    // an rgb96 footprint: words between its rows and between its slices
     std::uint32_t rgb96_slice_words = 0;
     Depth24Job depth24;                    // the whole copy: where its scratch floats are
@@ -2482,8 +2485,11 @@ void round_trip(const ReplayFunctions& vk, VkCommandBuffer command_buffer, const
 // Vulkan cannot copy a depth or stencil image aspect directly to or from a color image. The transfer
 // buffer preserves the native D16, D32 or S8 bits. Only the requested layers and planes are copied, even when the device
 // requires both parent aspects to transition layouts together. A storage descriptor always names GENERAL.
+// A D24 depth plane (p.has_depth24) goes through the depth24 pass's scratch instead: `run_depth24` records its
+// dispatches between the copy into that scratch and the copy out of it.
+template<typename RunDepth24>
 inline void copy_depth_uav(const ReplayFunctions& vk, VkCommandBuffer cb, const Prepared& p, const DepthUavCopy& copy,
-                           VkImageLayout parent_layout, LayoutTracker* tracker) {
+                           VkImageLayout parent_layout, LayoutTracker* tracker, RunDepth24&& run_depth24) {
     constexpr auto all = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     constexpr auto transfer = VK_PIPELINE_STAGE_TRANSFER_BIT;
     constexpr VkAccessFlags any = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -2504,8 +2510,11 @@ inline void copy_depth_uav(const ReplayFunctions& vk, VkCommandBuffer cb, const 
             image_barrier(vk, cb, child, piece.range, piece.layout, VK_IMAGE_LAYOUT_GENERAL,
                           piece.layout == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : any, all, child_access, transfer);
         if (tracker) tracker->set(child_id, color, VK_IMAGE_LAYOUT_GENERAL);
+        // A D24 depth aspect copies as 24-bit words, which the pass turns into floats where they lie, and back.
+        const bool words = plane == 0 && p.has_depth24 && copy.conversion.image;
+        const VkBuffer scratch = words ? p.depth24.scratch : copy.scratch;
         VkBufferImageCopy parent_region{};
-        parent_region.bufferOffset = copy.offset;
+        parent_region.bufferOffset = words ? p.depth24.scratch_offset : copy.offset;
         const VkImageAspectFlags aspect = plane ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
         parent_region.imageSubresource = {aspect, p.range.baseMipLevel, p.range.baseArrayLayer, p.range.layerCount};
         parent_region.imageExtent = {p.binding.width, p.binding.height, 1};
@@ -2535,9 +2544,17 @@ inline void copy_depth_uav(const ReplayFunctions& vk, VkCommandBuffer cb, const 
             }
         }
         vk.copy_image_to_buffer(cb, copy.to_storage ? p.binding.image : colour, VK_IMAGE_LAYOUT_GENERAL,
-                                copy.scratch, 1, copy.to_storage ? &parent_region : &child_region);
-        memory_barrier(vk, cb, VK_ACCESS_TRANSFER_WRITE_BIT, transfer, VK_ACCESS_TRANSFER_READ_BIT, transfer);
-        vk.copy_buffer_to_image(cb, copy.scratch, copy.to_storage ? colour : p.binding.image, VK_IMAGE_LAYOUT_GENERAL,
+                                scratch, 1, copy.to_storage ? &parent_region : &child_region);
+        if (words) {
+            constexpr auto compute = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            memory_barrier(vk, cb, VK_ACCESS_TRANSFER_WRITE_BIT, transfer,
+                           VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, compute);
+            run_depth24();
+            memory_barrier(vk, cb, VK_ACCESS_SHADER_WRITE_BIT, compute, VK_ACCESS_TRANSFER_READ_BIT, transfer);
+        } else {
+            memory_barrier(vk, cb, VK_ACCESS_TRANSFER_WRITE_BIT, transfer, VK_ACCESS_TRANSFER_READ_BIT, transfer);
+        }
+        vk.copy_buffer_to_image(cb, scratch, copy.to_storage ? colour : p.binding.image, VK_IMAGE_LAYOUT_GENERAL,
                                 1, copy.to_storage ? &child_region : &parent_region);
         if (convert && copy.to_storage) {
             memory_barrier(vk, cb, VK_ACCESS_TRANSFER_WRITE_BIT, transfer, VK_ACCESS_TRANSFER_READ_BIT, transfer);
@@ -3313,6 +3330,21 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
             const auto* middle = resolve(p.binding.depth_conversion);
             if (!middle || !middle->image) return ReplayResult::unresolved_resource;
             copy.conversion = *middle;
+            // Made as D24S8: the depth aspect copies as 24-bit words, which the depth24 pass turns into the floats of
+            // the R32_FLOAT image (or back) in its own scratch, a helper dispatch like a footprint copy's.
+            if (p.binding.format == VK_FORMAT_D24_UNORM_S8_UINT) {
+                if (statistics_active && !statistics_helpers) return unsupported_at(__LINE__);
+                Depth24Job& job = p.depth24;
+                job = {};
+                job.in_place = true;
+                job.to_float = after;
+                job.width = p.binding.width;
+                job.height = p.binding.height;
+                job.slices = p.range.layerCount;
+                if (!vk.depth24_prepare || !vk.depth24_run || !vk.depth24_prepare(job, p.depth24_parts))
+                    return unsupported_at(__LINE__);
+                p.has_depth24 = true;
+            }
         }
         const ResourceId ids[] = {p.binding.depth_uav, p.binding.stencil_uav};
         for (unsigned plane = 0; plane < 2; ++plane) {
@@ -3323,8 +3355,9 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
             copy.storage[plane] = *child;
         }
         const VkDeviceSize texels = VkDeviceSize(p.binding.width) * p.binding.height;
-        const auto largest_aspect = p.range.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT :
-                                                                                    VK_IMAGE_ASPECT_STENCIL_BIT;
+        // A depth plane the depth24 pass converts goes through that pass's scratch instead.
+        const auto largest_aspect = (p.range.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) && !p.has_depth24
+                                        ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_STENCIL_BIT;
         const VkDeviceSize bytes_per_texel = block_format(p.binding.format, largest_aspect).bytes;
         if (!texels || !bytes_per_texel || texels > UINT64_MAX / bytes_per_texel / p.range.layerCount)
             return ReplayResult::unsupported;
@@ -3398,7 +3431,10 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
                 (detail::unsupported_depth_uav_access(texture->layout_before, texture->access_before) ||
                  detail::unsupported_depth_uav_access(texture->layout_after, texture->access_after)))
                 return ReplayResult::unsupported;
-            if (!(texture->flags & texture_barrier_discard) && texture->layout_before != d3d12_layout::undefined) {
+            // A release (LayoutAfter UNDEFINED from a defined layout) keeps no contents: emit copies no plane for it,
+            // so none is prepared (nor a depth24 dispatch, which would split a statistics query for nothing).
+            if (!(texture->flags & texture_barrier_discard) && texture->layout_before != d3d12_layout::undefined &&
+                texture->layout_after != d3d12_layout::undefined) {
                 const auto result = prepare_depth_uav(p, detail::texture_uav_layout(texture->layout_before),
                                                       detail::texture_uav_layout(texture->layout_after));
                 if (result != ReplayResult::success) return result;
@@ -4357,7 +4393,15 @@ inline void emit_commands(const PreparedList& prepared, VkCommandBuffer command_
     };
     const auto finish_depth_uav_barrier = [&](const detail::Prepared& p, VkImageLayout layout) {
         if (p.depth_uav_copy != UINT32_MAX) {
-            detail::copy_depth_uav(vk, command_buffer, p, prepared.depth_uav_copies[p.depth_uav_copy], layout, tracker);
+            // A D24 depth plane's conversion is a helper dispatch (has_helper_dispatch): outside the statistics
+            // segment, and unpredicated like the barrier itself.
+            const auto convert_planes = [&] {
+                detail::end_statistics_segment(prepared, p.statistics_end, command_buffer, vk);
+                for (const auto& part : p.depth24_parts) run_depth24(part);
+                detail::begin_statistics_segment(prepared, p.statistics_begin, command_buffer, vk);
+            };
+            detail::copy_depth_uav(vk, command_buffer, p, prepared.depth_uav_copies[p.depth_uav_copy], layout, tracker,
+                                   convert_planes);
         } else if (p.order_depth_uav) {
             // A UAV-to-UAV texture barrier names the parent, but the actual shader accesses target its children.
             detail::memory_barrier(vk, command_buffer, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,

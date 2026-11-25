@@ -5167,10 +5167,10 @@ D3D12_RESOURCE_STATES depth_image_state(D3D12_RESOURCE_STATES requested) {
 }
 
 // The depth provider answers E_INVALIDARG or E_NOTIMPL for a texture it has no unordered-access form of
-// (Resource::enable_depth_stencil_uav). A console D16S8 target is one on a GPU with D24S8 attachments (every NVIDIA
-// card): pc_format() makes it as D24_UNORM_S8_UINT, and the provider takes only R16_TYPELESS, 118 and
-// R32G8X24_TYPELESS. Slots 76 and 133 then make the texture without unordered access, as they did before the provider
-// (#939), and the title gets its texture instead of asserting. Any other failure is passed on as it is.
+// (Resource::enable_depth_stencil_uav), as a console D16S8 target made as D24_UNORM_S8_UINT (pc_format(), every NVIDIA
+// card) was before the provider learnt that form, and a widened D16S8 one still is where the GPU cannot blit its
+// R16 and R32 planes. Slots 76 and 133 then make the texture without unordered access, as they did before the
+// provider (#939), and the title gets its texture instead of asserting. Any other failure is passed on as it is.
 bool depth_provider_refusal(HRESULT hr) { return hr == E_INVALIDARG || hr == E_NOTIMPL; }
 
 void note_depth_provider_refusal(std::atomic<bool>& seen, unsigned slot, DXGI_FORMAT format, HRESULT hr) {

@@ -61,6 +61,20 @@ public:
     // larger, so no copy is too big for the device. `whole.scratch` and `whole.scratch_offset` tell the copy where
     // the floats are.
     bool prepare(Depth24Job& whole, std::vector<Depth24Job>& parts) {
+        if (whole.in_place) {
+            // The words and the floats are one tight region of the scratch (depth24.h): each invocation reads its
+            // texel's word and writes the result over it, so the two descriptors may name the same bytes.
+            const std::uint64_t bytes = std::uint64_t(whole.width) * whole.height * whole.slices * 4;
+            if (!loaded_ || whole.rgb96 || whole.app || !bytes ||
+                std::uint64_t(whole.width) * whole.height > UINT32_MAX ||
+                (!whole.scratch && !scratch(bytes, whole.scratch, whole.scratch_offset)))
+                return false;
+            whole.app = whole.scratch;
+            whole.app_offset = whole.scratch_offset;
+            whole.app_size = whole.scratch_offset + bytes;
+            whole.app_row_words = whole.width;
+            whole.app_slice_words = whole.width * whole.height;
+        }
         // A row of the footprint is `aw` words wide and a row of the scratch `sw` (a texel is one word of each for
         // D24, three and four for 96-bit texels).
         const std::uint64_t aw = std::uint64_t(whole.width) * whole.app_texel_words();

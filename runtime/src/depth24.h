@@ -54,9 +54,16 @@ inline float depth24_clear_value(float value) { return depth24_to_float(depth24_
 // The same pass, scratch and job repack 96-bit R32G32B32 texels (`rgb96`, D3D-62): the footprint then has three
 // words a texel and the scratch four (the layer's R32G32B32A32 image), copied as they are. The row and slice
 // distances stay in words; only the texel's width differs (app_texel_words, scratch_texel_words).
+//
+// An `in_place` job has no buffer of the application's: the words and the floats are one tightly packed region of the
+// converter's scratch, which a copy command fills from an image before the pass and another copies out after it, and
+// each texel's word becomes its float (or the other way) where it is. prepare sets `app` and its layout to that region.
+// The console's D16S8 made as D24S8 moves its depth that way between the D24 aspect and an R32_FLOAT image, the one
+// its UAV plane is blitted from and to (vulkan_replay.h, copy_depth_uav).
 struct Depth24Job {
     bool to_float = false;           // an upload (D24 words to floats); false: a readback (floats to words)
     bool rgb96 = false;              // 96-bit texels: `to_float` is only the direction (true: the upload)
+    bool in_place = false;           // the words and the floats share the scratch (see above); D24 only
     std::uint32_t app_texel_words() const { return rgb96 ? 3 : 1; }
     std::uint32_t scratch_texel_words() const { return rgb96 ? 4 : 1; }
     VkBuffer app = VK_NULL_HANDLE;   // the application's buffer

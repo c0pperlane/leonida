@@ -3096,11 +3096,12 @@ if(TARGET Vulkan::Headers)
     set_tests_properties(xbox_d16s8_storage PROPERTIES
                          ENVIRONMENT "LEONIDA_TEST_D16S8_UAV=1;LEONIDA_CONSOLE_D16S8=native" SKIP_RETURN_CODE 77 TIMEOUT 30)
     set_tests_properties(xbox_depth_storage PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
-    # Made as D24S8, a D16S8 depth-stencil texture with unordered access is refused by the depth provider; slots 76
-    # and 133 make it without unordered access instead (d24 forces what a GPU with D24S8 attachments chooses).
-    add_test(NAME xbox_d16s8_refused_uav COMMAND xbox_depth_storage_test)
-    set_tests_properties(xbox_d16s8_refused_uav PROPERTIES
-                         ENVIRONMENT "LEONIDA_TEST_D16S8_REFUSED_UAV=1;LEONIDA_CONSOLE_D16S8=d24" SKIP_RETURN_CODE 77 TIMEOUT 30)
+    # Made as D24S8 (d24 forces what a GPU with D24S8 attachments chooses), a D16S8 depth-stencil texture keeps its
+    # unordered access: slots 76 and 133 make it with its planes, and the same round trip runs, with the depth image's
+    # own 24-bit words read back as well.
+    add_test(NAME xbox_d16s8_d24_storage COMMAND xbox_depth_storage_test)
+    set_tests_properties(xbox_d16s8_d24_storage PROPERTIES
+                         ENVIRONMENT "LEONIDA_TEST_D16S8_UAV=1;LEONIDA_CONSOLE_D16S8=d24" SKIP_RETURN_CODE 77 TIMEOUT 30)
     add_executable(xbox_d16s8_surface_test test/xbox_d16s8_surface_test.cpp)
     target_link_libraries(xbox_d16s8_surface_test PRIVATE gta6rt_d3d12_com)
     target_compile_definitions(xbox_d16s8_surface_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

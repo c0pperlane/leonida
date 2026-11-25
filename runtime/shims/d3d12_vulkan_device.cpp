@@ -6576,7 +6576,9 @@ public:
     // The Xbox proxy calls this before publishing an allocated depth texture. Each storage plane owns a
     // regular color image with its own GFX10 address, so a UAV cannot replace the original SRV in set 0.
     HRESULT enable_depth_stencil_uav(D3D12_HEAP_FLAGS storage_heap_flags) {
-        const bool narrow_stencil = desc_.Format == xbox_d16s8;
+        // The proxy hands over R16_TYPELESS, R32G8X24_TYPELESS and the console's D16S8 only (depth_uav_description),
+        // so a D24_UNORM_S8_UINT texture here is a D16S8 one that pc_format() made as D24S8.
+        const bool narrow_stencil = desc_.Format == xbox_d16s8 || desc_.Format == DXGI_FORMAT_D24_UNORM_S8_UINT;
         const bool depth16 = desc_.Format == DXGI_FORMAT_R16_TYPELESS || narrow_stencil;
         if (!image_ || (!depth16 && desc_.Format != DXGI_FORMAT_R32G8X24_TYPELESS) ||
             !(desc_.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) ||
@@ -6592,8 +6594,11 @@ public:
             const bool widened = narrow_stencil && format_ != VK_FORMAT_D16_UNORM_S8_UINT;
             std::unique_ptr<Resource> conversion;
             if (widened) {
+                // Stored as D32S8, the depth aspect copies as the R32_FLOAT image's bits. Made as D24S8, it copies as
+                // 24-bit words, which the depth24 pass turns into those floats and back (vulkan_replay.h, copy_depth_uav).
                 const auto blit = VK_FORMAT_FEATURE_2_BLIT_SRC_BIT | VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
-                if (format_ != VK_FORMAT_D32_SFLOAT_S8_UINT || (device_.optimal_features(VK_FORMAT_R16_UNORM) & blit) != blit ||
+                if ((format_ != VK_FORMAT_D32_SFLOAT_S8_UINT && format_ != VK_FORMAT_D24_UNORM_S8_UINT) ||
+                    (device_.optimal_features(VK_FORMAT_R16_UNORM) & blit) != blit ||
                     (device_.optimal_features(VK_FORMAT_R32_SFLOAT) & blit) != blit) return E_NOTIMPL;
                 auto intermediate = plane_desc;
                 intermediate.Format = DXGI_FORMAT_R32_FLOAT;
@@ -14504,9 +14509,12 @@ public:
                 return;
             }
             const Resource* storage = r->depth_stencil_uav(view.plane);
-            const bool raw_narrow = storage && r->desc().Format == xbox_d16s8 && view.plane == 0 &&
-                                    (view.format == DXGI_FORMAT_R16_UINT ||
-                                     (storage->desc().Format == DXGI_FORMAT_R16_TYPELESS && view.format == DXGI_FORMAT_R16_UNORM));
+            // The D16 plane of the console's D16S8: R16_UINT, or R16_UNORM too where it is widened (an R16_TYPELESS
+            // plane, which a D16S8 made as D24S8 also has).
+            const bool widened = storage && storage->desc().Format == DXGI_FORMAT_R16_TYPELESS;
+            const bool raw_narrow = storage && view.plane == 0 &&
+                                    ((r->desc().Format == xbox_d16s8 && view.format == DXGI_FORMAT_R16_UINT) ||
+                                     (widened && (view.format == DXGI_FORMAT_R16_UINT || view.format == DXGI_FORMAT_R16_UNORM)));
             if (!storage || (!raw_narrow && view.format != storage->desc().Format)) {
                 log_once("unsupported Xbox depth-stencil UAV plane or format; format", int(view.format));
                 return;
