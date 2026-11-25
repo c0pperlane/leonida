@@ -17470,12 +17470,14 @@ WindowPresenter::~WindowPresenter() {
 
 namespace {
 // present_failure_log.h names these by number so that it needs no Vulkan header; keep the two in step.
-static_assert(int(VK_SUBOPTIMAL_KHR) == 1000001003 && int(VK_ERROR_OUT_OF_HOST_MEMORY) == -1 &&
+static_assert(int(VK_SUCCESS) == 0 && int(VK_NOT_READY) == 1 && int(VK_TIMEOUT) == 2 &&
+              int(VK_SUBOPTIMAL_KHR) == 1000001003 && int(VK_ERROR_OUT_OF_HOST_MEMORY) == -1 &&
               int(VK_ERROR_OUT_OF_DEVICE_MEMORY) == -2 && int(VK_ERROR_INITIALIZATION_FAILED) == -3 &&
               int(VK_ERROR_DEVICE_LOST) == -4 && int(VK_ERROR_FORMAT_NOT_SUPPORTED) == -11 &&
               int(VK_ERROR_UNKNOWN) == -13 && int(VK_ERROR_SURFACE_LOST_KHR) == -1000000000 &&
               int(VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) == -1000000001 &&
-              int(VK_ERROR_OUT_OF_DATE_KHR) == -1000001004,
+              int(VK_ERROR_OUT_OF_DATE_KHR) == -1000001004 &&
+              int(VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) == -1000255000,
               "present_result_name's numbers are VkResult values");
 
 // A presenter that fails every frame is reported at its 1st, 10th, 100th, ... failure, not once per frame
