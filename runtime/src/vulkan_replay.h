@@ -1389,7 +1389,39 @@ struct Prepared {
     XdxrBlasTable xdxr_blases;        // an XDXR TLAS build: how its instances' BLAS addresses are translated
     VkAccelerationStructureKHR accel_src = VK_NULL_HANDLE;
     std::uint32_t khr_postbuild = ~0u;  // index into PreparedList::khr_postbuilds; ~0u: skipped or XDXR
+
+    // Back to a new entry's state, keeping the vectors' storage: everything comes from a new Prepared, and the
+    // vectors are swapped in emptied. Not `*this = Prepared{}` by copy: copying a vector from an empty one calls
+    // memmove(nullptr, nullptr, 0), about 110 ns with MSVC's CRT, so eleven of them made a kept entry cost 1.2 us
+    // (replay_cpu_bench, "entries, storage kept"). A vector left out here would only lose its storage.
+    void reset() {
+        Prepared fresh;
+        const auto keep = [](auto& mine, auto& into) {
+            mine.clear();
+            into.swap(mine);
+        };
+        keep(predicated_copy, fresh.predicated_copy);
+        keep(rects, fresh.rects);
+        keep(buffer_copies, fresh.buffer_copies);
+        keep(buffer_image_copies, fresh.buffer_image_copies);
+        keep(tile_rows, fresh.tile_rows);
+        keep(image_copies, fresh.image_copies);
+        keep(depth24_parts, fresh.depth24_parts);
+        keep(staged_reads, fresh.staged_reads);
+        keep(staged_writes, fresh.staged_writes);
+        keep(discards, fresh.discards);
+        keep(fills, fresh.fills);
+        *this = std::move(fresh);
+    }
 };
+
+// `count` new entries in `entries`, keeping the storage of those already there (PreparedList::commands is kept from
+// one execution to the next).
+inline void reset_prepared(std::vector<Prepared>& entries, std::size_t count) {
+    const std::size_t kept = std::min(entries.size(), count);
+    for (std::size_t i = 0; i < kept; ++i) entries[i].reset();
+    entries.resize(count);
+}
 
 struct DepthUavCopy {
     std::array<ResourceBinding, 2> storage;
@@ -3315,7 +3347,7 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
     if (list.queries_open()) return ReplayResult::invalid_query;  // a Vulkan query must end in its command buffer
     const auto commands = list.commands();
     out.list = &list;
-    out.commands.assign(commands.size(), {});
+    detail::reset_prepared(out.commands, commands.size());
     out.draw_count = 0;
     out.depth_uav_copies.clear();
     out.queries.clear();

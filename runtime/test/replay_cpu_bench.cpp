@@ -23,6 +23,7 @@
 #include "../src/vulkan_replay.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -625,6 +626,39 @@ int main(int argc, char** argv) {
             ++failures;
         }
 
+        // A kept entry comes back as a new one: every field reset, every vector emptied in the storage it had, and
+        // no allocation.
+        {
+            std::vector<detail::Prepared> entries(2);
+            detail::Prepared& e = entries[0];
+            const auto vectors = [](detail::Prepared& p) {
+                return std::tie(p.predicated_copy, p.rects, p.buffer_copies, p.buffer_image_copies, p.tile_rows,
+                                p.image_copies, p.depth24_parts, p.staged_reads, p.staged_writes, p.discards, p.fills);
+            };
+            std::apply([](auto&... v) { (v.emplace_back(), ...); }, vectors(e));
+            const auto storage = std::apply([](auto&... v) { return std::array{static_cast<const void*>(v.data())...}; },
+                                            vectors(e));
+            e.skip = true;
+            e.draw = 7;
+            e.khr_postbuild = 3;
+            e.binding.image = fake_handle<VkImage>(0x20);
+            e.range.levelCount = 5;
+            e.pipeline.async_build = true;
+            const std::size_t a0 = g_allocations;
+            detail::reset_prepared(entries, 1);
+            const bool allocated = g_allocations != a0;
+            const bool emptied = std::apply([](auto&... v) { return (v.empty() && ...); }, vectors(entries[0]));
+            const auto kept = std::apply([](auto&... v) { return std::array{static_cast<const void*>(v.data())...}; },
+                                         vectors(entries[0]));
+            const detail::Prepared& r = entries[0];
+            if (allocated || entries.size() != 1 || !emptied || kept != storage || r.skip || r.draw ||
+                r.khr_postbuild != ~0u || r.binding.image || r.range.levelCount || r.pipeline.async_build) {
+                std::fprintf(stderr, "FAIL entry storage: a kept entry allocated, lost its vectors' storage or kept "
+                                     "a field\n");
+                ++failures;
+            }
+        }
+
         // A pending PSO must skip only its own commands. Reuse the same list after
         // publication: both direct and indirect dispatch and the draw must now emit.
         {
@@ -685,7 +719,7 @@ int main(int argc, char** argv) {
         for (int rep = 0; rep < warmup + reps; ++rep) {
             const auto t0 = std::chrono::steady_clock::now();
             if (kept) {
-                storage.commands.assign(f.commands, {});
+                detail::reset_prepared(storage.commands, f.commands);  // what prepare does
             } else {
                 PreparedList fresh;
                 fresh.commands.assign(f.commands, {});
