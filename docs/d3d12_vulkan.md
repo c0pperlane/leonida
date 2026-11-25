@@ -777,9 +777,11 @@ which has one array layer. `d3d12_descriptor_test` checks samples at four W coor
 volume, plus minimum-LOD clamped views (inside the mip range via `VK_EXT_image_view_min_lod`, at or below
 `MostDetailedMip`, and above the last mip).
 
-Known gaps in the descriptor path: buffer shader-resource views and constant-buffer views (the V# a shader would
-load for them; the structure is in `gfx10_descriptors.h`, the views are not written; buffer UAVs of every kind are,
-section 3.4 "Buffer UAVs", `d3d12_m4_compute_test` and `d3d12_buffer_uav_test`);
+Buffer shader-resource views and constant-buffer views are written as the 16-byte GFX10 V# a shader loads
+(`gfx10_descriptors.h`) in the first half of the slot: `write_buffer_srv` for raw, structured and typed buffer
+SRVs, `CreateConstantBufferView` for CBVs in the console's form of 16-byte rows (`LEONIDA_CBV_RAW=1` writes a raw
+V#), both checked in `d3d12_compute_test`; buffer UAVs of every kind are written too (section 3.4 "Buffer UAVs",
+`d3d12_m4_compute_test` and `d3d12_buffer_uav_test`). Known gaps in the descriptor path:
 1D-array SRVs, other typeless volume formats, multisampled depth/stencil and typeless
 color SRVs, and shader-translator lowering for multisample loads. Single-sampled depth-plane views (`R24_UNORM_X8_TYPELESS`,
 `R32_FLOAT_X8X24_TYPELESS`) are a T# of the texture's depth format (8_24_UNORM, X24_8_32_FLOAT) through the
