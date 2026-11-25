@@ -15,6 +15,7 @@
 #include <span>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -221,6 +222,12 @@ constexpr std::uint32_t query_result_size(std::uint32_t query_type) {
     }
 }
 
+// A DSV's D3D12_DSV_FLAGS that change how a draw uses it (TargetView::read_only), with D3D12's values.
+namespace d3d12_dsv {
+inline constexpr std::uint32_t read_only_depth = 0x1;    // D3D12_DSV_FLAG_READ_ONLY_DEPTH
+inline constexpr std::uint32_t read_only_stencil = 0x2;  // D3D12_DSV_FLAG_READ_ONLY_STENCIL
+}  // namespace d3d12_dsv
+
 // A view captured by value while recording: the CPU descriptor slot may be rewritten after the call.
 struct TargetView {
     ResourceId resource;
@@ -228,7 +235,11 @@ struct TargetView {
     std::uint32_t first_layer;
     std::uint32_t layer_count;
     ColorViewFormat format = ColorViewFormat::resource;
+    std::uint32_t read_only = 0;  // a DSV's d3d12_dsv flags: the planes a draw tests against but never writes
+    // Fills what would be padding: an RTV or DSV slot is these bytes, copied and compared as bytes.
+    std::uint32_t reserved = 0;
 };
+static_assert(std::has_unique_object_representations_v<TargetView>, "TargetView must have no padding bytes");
 
 // D3D12_RECT: right and bottom are exclusive.
 struct Rect {

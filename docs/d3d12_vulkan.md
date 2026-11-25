@@ -1171,8 +1171,10 @@ increase; such a signal is reported and dropped); a CPU `Signal` above a queue `
 yet is held until it has (`vkSignalSemaphore` must stay below every pending signal,
 `VUID-VkSemaphoreSignalInfo-value-03259`), so `GetCompletedValue` shows it only then, and a fence released
 while it holds one drops it; instance step rates above 1 (they need vertex attribute
-divisors); read-only DSVs (the depth image always moves to `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`, which matters once
-depth SRVs are sampled next to a read-only DSV, M2); the index buffer is bound without its view's size
+divisors); without separate depth/stencil layouts, a barrier on one plane of a depth-stencil image moves both
+planes with only that plane's source scope, so a stencil plane written through a DSV whose depth is read-only
+races the depth plane's next barrier (the layer the runtime makes always has separate layouts); the index buffer is
+bound without its view's size
 (`vkCmdBindIndexBuffer2`, Vulkan 1.4, takes one).
 
 Known gaps found in review, not fixed here:
@@ -3182,6 +3184,26 @@ mapped stages/accesses, and if no single layout serves all uses, use `GENERAL` a
 | `PRESENT` | `PRESENT_SRC_KHR` for swapchain images, `GENERAL` otherwise | present |
 | `RAYTRACING_ACCELERATION_STRUCTURE` | buffer, no layout | acceleration structure read/write |
 
+- Read-only DSVs (`D3D12_DSV_FLAG_READ_ONLY_DEPTH` / `_STENCIL`, kept in `TargetView::read_only`,
+  RT-DSV-READ-ONLY-LAYOUT): a draw uses a writable DSV in `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`. One with read-only
+  planes keeps each plane in the layout its barrier gave it when that allows the draw (`GENERAL`,
+  `DEPTH_STENCIL_ATTACHMENT_OPTIMAL` since D3D12 also takes it in `DEPTH_WRITE`, or a layout that keeps the read-only
+  aspects read-only): `DEPTH_READ | *_SHADER_RESOURCE`, where a shader samples the texture while the depth test reads
+  it, is `DEPTH_STENCIL_READ_ONLY_OPTIMAL`, or `GENERAL` once set 0's descriptors make it so, and the draw changes
+  neither; a stencil plane left in `DEPTH_WRITE` stays in `DEPTH_STENCIL_ATTACHMENT_OPTIMAL` beside it (separate
+  depth/stencil layouts, one layout per aspect in `VkRenderingInfo`). Otherwise a read-only plane moves to
+  `DEPTH_STENCIL_READ_ONLY_OPTIMAL`, and without separate layouts an image with one of two planes read-only to
+  `DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL` / `DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL` (Vulkan 1.1 layouts naming
+  both aspects) (`depth_attachment_layouts` in `vulkan_replay.h`). D3D12 writes nothing through a read-only plane whatever the PSO says, and Vulkan forbids writes
+  to an aspect in a read-only layout (`VUID-vkCmdDraw-None-06886`, `-06887`): a PSO that writes depth or stencil is
+  drawn through a variant without those writes (`GraphicsPipeline::read_only_depth`, `read_only_stencil`), and the
+  read-only aspects' `storeOp` is `NONE`, since `STORE` counts as a write (the synchronization layer reported it
+  racing the barrier out of `DEPTH_READ`, whose source scope has no write). `d3d12_read_only_dsv_test` samples a D32 and a D32S8 depth plane in the same
+  draw that tests against it, on an RTX 5080 Laptop GPU and a Radeon 610M with the SDK 1.4.363 validation layer:
+  before, the draw wrote depth 0.75 over the cleared 0.875 (and stencil through a read-only stencil plane), the
+  shader sampled that, and the layer reported a write-after-write hazard for each of the five runs; after, the depth
+  and stencil keep their values, the shader samples the cleared depth, and the layer reports nothing. The same holds
+  with RT-BINDLESS-DEPTH-READ-SRV-LAYOUT's change merged on top, where the sampled planes are kept in `GENERAL`.
 - Split barriers (`BEGIN_ONLY`/`END_ONLY`, and enhanced `SYNC_SPLIT`) are an optimisation. The resource is unusable
   between the halves, so one full barrier at either point is correct; the IR records it at the end point
   (`command_list.h`). Use `VK_KHR_synchronization2` events if profiling needs the overlap.

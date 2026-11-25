@@ -890,9 +890,14 @@ struct GraphicsPipeline {
     bool viewport_with_count = false;     // pipeline uses VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT / SCISSOR_WITH_COUNT
     // The same pipeline with some attachment formats VK_FORMAT_UNDEFINED, for a draw that leaves those slots
     // unbound (D3D12 allows it; dynamic rendering needs the formats to agree). Bit i: colour slot i, bit 8: depth
-    // and stencil. Null when it cannot be built.
+    // and stencil. Bits 10 and 11: no depth writes, no stencil writes, for a read-only DSV (D3D12 writes nothing
+    // through one, and Vulkan forbids writes to an aspect in a read-only layout). Null when it cannot be built.
     static constexpr std::uint32_t unbound_depth = 1u << 8;
     static constexpr std::uint32_t rectangle_stage = 1u << 9;
+    static constexpr std::uint32_t read_only_depth = 1u << 10;
+    static constexpr std::uint32_t read_only_stencil = 1u << 11;
+    bool depth_writes = false;    // the depth-stencil state writes depth
+    bool stencil_writes = false;  // or stencil: a read-only DSV takes the variant without
     // IA topology requiring a fourth-corner geometry stage. Zero when the PSO already contains the stage.
     std::uint32_t rectangle_variant_topology = 0;
     std::function<VkPipeline(std::uint32_t flags)> variant;
@@ -1429,6 +1434,7 @@ struct PreparedDraw {
     PipelineCompiles::Ticket compile = 0;  // where `pipeline` comes from when it was not built yet
     std::vector<Attachment> colors;  // by slot; id 0 = unbound
     Attachment depth;
+    VkImageAspectFlags depth_read_only = 0;  // the aspects of `depth` its DSV makes read-only
     std::vector<VkBuffer> vertex_buffers;
     std::vector<VkDeviceSize> vertex_offsets, vertex_sizes, vertex_strides;
     VkBuffer index_buffer = VK_NULL_HANDLE;
@@ -1454,6 +1460,7 @@ struct PreparedDraw {
         compile = 0;
         colors.clear();
         depth = {};
+        depth_read_only = 0;
         vertex_buffers.clear();
         vertex_offsets.clear();
         vertex_sizes.clear();
@@ -2714,6 +2721,9 @@ ReplayResult prepare_draw(const Draw& draw, const IndirectDrawArgs* arguments, R
         a.view = vk.image_view(viewed, a.range);
         if (!a.view) return unsupported_at(__LINE__);
         shrink(a.binding, draw.depth, a.range);
+        if (draw.depth.read_only & d3d12_dsv::read_only_depth) p.depth_read_only |= VK_IMAGE_ASPECT_DEPTH_BIT;
+        if (draw.depth.read_only & d3d12_dsv::read_only_stencil) p.depth_read_only |= VK_IMAGE_ASPECT_STENCIL_BIT;
+        p.depth_read_only &= a.binding.aspects;
     }
     if (p.area.width == UINT32_MAX) {  // no attachment: the viewports bound the rendering
         std::uint32_t max_w = std::uint32_t(std::max(0.0f, draw.viewport.x + draw.viewport.width));
@@ -2737,6 +2747,10 @@ ReplayResult prepare_draw(const Draw& draw, const IndirectDrawArgs* arguments, R
     for (std::size_t slot = 0; slot < p.colors.size(); ++slot)
         if (pipeline->color_formats[slot] != VK_FORMAT_UNDEFINED && !p.colors[slot].id) unbound |= 1u << slot;
     if (pipeline->depth_format != VK_FORMAT_UNDEFINED && !p.depth.id) unbound |= GraphicsPipeline::unbound_depth;
+    if ((p.depth_read_only & VK_IMAGE_ASPECT_DEPTH_BIT) && pipeline->depth_writes)
+        unbound |= GraphicsPipeline::read_only_depth;
+    if ((p.depth_read_only & VK_IMAGE_ASPECT_STENCIL_BIT) && pipeline->stencil_writes)
+        unbound |= GraphicsPipeline::read_only_stencil;
     if (unbound || !p.pipeline) {
         const bool indirect_rect_variant = arguments && (unbound & GraphicsPipeline::rectangle_stage);
         if (vk.compiles && pipeline->variant && pipeline->built && !pipeline->async_build && !indirect_rect_variant) {
@@ -2916,6 +2930,61 @@ inline void to_attachment(const ReplayFunctions& vk, VkCommandBuffer command_buf
                       VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, access, stages);
     }
     if (tracker) tracker->set(a.id, range, layout);
+}
+
+// The layouts a draw uses its depth-stencil view in, of the depth and of the stencil aspect (the same unless separate
+// depth/stencil layouts let the planes differ). A writable view: DEPTH_STENCIL_ATTACHMENT_OPTIMAL. One with read-only
+// aspects (D3D12_DSV_FLAG_READ_ONLY_DEPTH/STENCIL), whose resource D3D12 has in DEPTH_READ, maybe with a
+// shader-resource state so that a shader samples it in the same draw: the layout the aspects are tracked in already
+// when it allows the draw's use, so the draw changes no layout and a texture sampled through set 0 keeps the layout
+// its barrier gave it (GENERAL where set 0's descriptors say so, ResourceBinding::sampled_in_general). Allowed: GENERAL,
+// DEPTH_STENCIL_ATTACHMENT_OPTIMAL (D3D12 also takes a read-only DSV in DEPTH_WRITE; the pipeline masks the writes)
+// and the layouts that keep the read-only aspects read-only. Otherwise DEPTH_STENCIL_READ_ONLY_OPTIMAL for the
+// read-only aspects; on a combined image with one read-only aspect of two, DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL
+// or DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL (Vulkan 1.1), which name both aspects.
+struct DepthStencilLayouts {
+    VkImageLayout depth;
+    VkImageLayout stencil;
+};
+
+inline DepthStencilLayouts depth_attachment_layouts(const PreparedDraw::Attachment& a, VkImageAspectFlags read_only,
+                                                    const LayoutTracker* tracker, bool separate) {
+    const VkImageLayout attachment = image_layout(a.binding, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    if (!read_only) return {attachment, attachment};
+    // The layout `aspects` are all tracked in when it serves a draw that writes `writable`, else `fallback`.
+    const auto kept = [&](VkImageAspectFlags aspects, VkImageAspectFlags writable, VkImageLayout fallback) {
+        VkImageSubresourceRange range = a.range;
+        range.aspectMask = aspects;
+        const auto pieces = current(tracker, a.id, range, fallback);
+        const VkImageLayout tracked = pieces.empty() ? VK_IMAGE_LAYOUT_UNDEFINED : pieces[0].layout;
+        for (const auto& piece : pieces)
+            if (piece.layout != tracked) return fallback;
+        switch (tracked) {
+        case VK_IMAGE_LAYOUT_GENERAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL: return tracked;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL: return writable ? fallback : tracked;
+        case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL:
+            return writable & VK_IMAGE_ASPECT_DEPTH_BIT ? fallback : tracked;
+        case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL:
+            return writable & VK_IMAGE_ASPECT_STENCIL_BIT ? fallback : tracked;
+        default: return fallback;
+        }
+    };
+    const VkImageLayout read_only_layout = image_layout(a.binding, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    if (separate && two_planes(a.binding)) {
+        const auto plane = [&](VkImageAspectFlags aspect) {
+            return (read_only & aspect) ? kept(aspect, 0, read_only_layout) : kept(aspect, aspect, attachment);
+        };
+        return {plane(VK_IMAGE_ASPECT_DEPTH_BIT), plane(VK_IMAGE_ASPECT_STENCIL_BIT)};
+    }
+    const VkImageAspectFlags writable = a.binding.aspects & depth_stencil_aspects & ~read_only;
+    const VkImageLayout fallback =
+        !writable ? read_only_layout
+        : image_layout(a.binding, (read_only & VK_IMAGE_ASPECT_DEPTH_BIT)
+                                      ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL
+                                      : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL);
+    const VkImageLayout layout = kept(planes_for_layout(a.binding, a.range, separate).aspectMask, writable, fallback);
+    return {layout, layout};
 }
 
 } // namespace detail
@@ -5240,14 +5309,31 @@ inline void emit_commands(const PreparedList& prepared, VkCommandBuffer command_
                 colors[slot].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             }
             VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+            VkRenderingAttachmentInfo stencil{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
             if (d.depth.id) {
-                const VkImageLayout layout = image_layout(d.depth.binding, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-                detail::to_attachment(vk, command_buffer, d.depth, layout, depth_access, depth_stages, tracker,
-                                      separate);
+                const auto layouts = detail::depth_attachment_layouts(d.depth, d.depth_read_only, tracker, separate);
+                if (layouts.depth == layouts.stencil) {
+                    detail::to_attachment(vk, command_buffer, d.depth, layouts.depth, depth_access, depth_stages,
+                                          tracker, separate);
+                } else {  // separate layouts: each plane keeps its own
+                    for (const VkImageAspectFlags aspect : {VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_ASPECT_STENCIL_BIT}) {
+                        detail::PreparedDraw::Attachment plane = d.depth;
+                        plane.range.aspectMask = aspect;
+                        detail::to_attachment(vk, command_buffer, plane,
+                                              aspect == VK_IMAGE_ASPECT_DEPTH_BIT ? layouts.depth : layouts.stencil,
+                                              depth_access, depth_stages, tracker, separate);
+                    }
+                }
                 depth.imageView = d.depth.view;
-                depth.imageLayout = layout;
                 depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
                 depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                stencil = depth;
+                depth.imageLayout = layouts.depth;
+                stencil.imageLayout = layouts.stencil;
+                // A read-only aspect is not stored either: STORE is a write (a hazard with the barrier out of the
+                // read-only state), NONE leaves the contents as they are.
+                if (d.depth_read_only & VK_IMAGE_ASPECT_DEPTH_BIT) depth.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
+                if (d.depth_read_only & VK_IMAGE_ASPECT_STENCIL_BIT) stencil.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
             }
             VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
             rendering.renderArea = {{0, 0}, d.area};
@@ -5256,7 +5342,7 @@ inline void emit_commands(const PreparedList& prepared, VkCommandBuffer command_
             rendering.pColorAttachments = colors.data();
             const GraphicsPipeline& graphics = *d.graphics;
             if (d.depth.id && (graphics.depth_aspects & VK_IMAGE_ASPECT_DEPTH_BIT)) rendering.pDepthAttachment = &depth;
-            if (d.depth.id && (graphics.depth_aspects & VK_IMAGE_ASPECT_STENCIL_BIT)) rendering.pStencilAttachment = &depth;
+            if (d.depth.id && (graphics.depth_aspects & VK_IMAGE_ASPECT_STENCIL_BIT)) rendering.pStencilAttachment = &stencil;
             vk.begin_rendering(command_buffer, &rendering);
 
             ShaderUserData data{};

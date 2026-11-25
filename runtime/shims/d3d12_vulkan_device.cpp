@@ -119,6 +119,8 @@ constexpr auto kQuadIndicesPerQuad = std::uint32_t(leonida::quad_triangle_indice
 constexpr std::uint32_t kQuadIndexCount = 16 * 1024 * kQuadIndicesPerQuad;
 constexpr VkDeviceSize kArenaReserved = kZeroPage + VkDeviceSize(kQuadIndexCount) * sizeof(std::uint32_t);
 static_assert(sizeof(leonida::TargetView) <= kDescriptorSize);
+static_assert(leonida::d3d12_dsv::read_only_depth == D3D12_DSV_FLAG_READ_ONLY_DEPTH &&
+              leonida::d3d12_dsv::read_only_stencil == D3D12_DSV_FLAG_READ_ONLY_STENCIL);
 // pipeline_cache_store.h reads this layout without vulkan.h (D3D-704); remember the two.
 static_assert(sizeof(VkPipelineCacheHeaderVersionOne) == leonida::pipeline_cache_store::header_bytes);
 
@@ -8960,6 +8962,8 @@ public:
         graphics_.samples = samples;
         recipe_.sample_mask = sample_mask;
         recipe_.depth = depth;
+        graphics_.depth_writes = depth.depthWriteEnable;
+        graphics_.stencil_writes = depth.stencilTestEnable && (depth.front.writeMask || depth.back.writeMask);
         recipe_.blends = std::move(blends);
         recipe_.blend = blend;
         if (!lazy_) {
@@ -9388,6 +9392,11 @@ private:
             raster.pNext = &conservative;
         }
         multisample.pSampleMask = &r.sample_mask;
+        // A read-only DSV's planes are not written (D3D12), and Vulkan forbids writes to an aspect it uses in a
+        // read-only layout (VUID-vkCmdDraw-None-06886 and -06887).
+        VkPipelineDepthStencilStateCreateInfo depth = r.depth;
+        if (unbound & leonida::GraphicsPipeline::read_only_depth) depth.depthWriteEnable = VK_FALSE;
+        if (unbound & leonida::GraphicsPipeline::read_only_stencil) depth.front.writeMask = depth.back.writeMask = 0;
         VkPipelineColorBlendStateCreateInfo blend = r.blend;
         blend.attachmentCount = std::uint32_t(r.blends.size());
         blend.pAttachments = r.blends.data();
@@ -9506,7 +9515,7 @@ private:
         info.pViewportState = &viewport;
         info.pRasterizationState = &raster;
         info.pMultisampleState = &multisample;
-        info.pDepthStencilState = &r.depth;
+        info.pDepthStencilState = &depth;
         info.pColorBlendState = &blend;
         info.pDynamicState = &dynamic;
         info.flags=flags;
@@ -14055,6 +14064,9 @@ public:
                 view = {};
             }
             if (r->desc().Format == DXGI_FORMAT_A8_UNORM || (desc && desc->Format == DXGI_FORMAT_A8_UNORM)) view = {};
+            // A read-only plane is tested against in a read-only layout and never written (RT-DSV-READ-ONLY-LAYOUT).
+            if (view.resource && desc)
+                view.read_only = desc->Flags & (D3D12_DSV_FLAG_READ_ONLY_DEPTH | D3D12_DSV_FLAG_READ_ONLY_STENCIL);
         } else if (resource) {
             stub("ID3D12Device::CreateDepthStencilView(resource from another device)");
         }

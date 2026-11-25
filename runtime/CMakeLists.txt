@@ -3898,6 +3898,25 @@ if(TARGET Vulkan::Headers)
       target_compile_options(d3d12_depth24_draw_test PRIVATE /W4 /permissive- /utf-8)
       add_test(NAME d3d12_depth24_draw COMMAND d3d12_depth24_draw_test)
       set_tests_properties(d3d12_depth24_draw PROPERTIES SKIP_RETURN_CODE 77)
+      # RT-DSV-READ-ONLY-LAYOUT: a depth texture depth-tested through a read-only DSV while its pixel shader samples it
+      # through set 0; the read-only aspects are not written.
+      set(LEONIDA_TEST_PS_READ_ONLY_DSV ${CMAKE_CURRENT_BINARY_DIR}/generated/ps_read_only_dsv.spv)
+      add_custom_command(
+        OUTPUT ${LEONIDA_TEST_PS_READ_ONLY_DSV}
+        COMMAND ${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE} -V --target-env vulkan1.3 -o ${LEONIDA_TEST_PS_READ_ONLY_DSV}
+                ${CMAKE_CURRENT_SOURCE_DIR}/test/glsl/ps_read_only_dsv.frag
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test/glsl/ps_read_only_dsv.frag
+        COMMENT "Compiling the read-only DSV test shader"
+        VERBATIM)
+      add_executable(d3d12_read_only_dsv_test test/d3d12_read_only_dsv_test.cpp shims/d3d12_xs_device.cpp
+                     shims/d3d12_xs_pso_stream.cpp ${LEONIDA_TEST_VS_DEPTH} ${LEONIDA_TEST_PS_READ_ONLY_DSV})
+      target_link_libraries(d3d12_read_only_dsv_test PRIVATE gta6rt_d3d12_com)
+      target_compile_definitions(d3d12_read_only_dsv_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+                                 LEONIDA_TEST_VS_DEPTH_SPV="${LEONIDA_TEST_VS_DEPTH}"
+                                 LEONIDA_TEST_PS_READ_ONLY_DSV_SPV="${LEONIDA_TEST_PS_READ_ONLY_DSV}")
+      target_compile_options(d3d12_read_only_dsv_test PRIVATE /W4 /permissive- /utf-8)
+      add_test(NAME d3d12_read_only_dsv COMMAND d3d12_read_only_dsv_test)
+      set_tests_properties(d3d12_read_only_dsv PROPERTIES SKIP_RETURN_CODE 77)
       # Set 0 from the compute bind point: a compute PSO whose shader declares set-0 bindings samples through the
       # device's bindless set, which nothing but the layer binds.
       set(LEONIDA_TEST_CS_SET0_SAMPLE ${CMAKE_CURRENT_BINARY_DIR}/generated/cs_set0_sample.spv)
