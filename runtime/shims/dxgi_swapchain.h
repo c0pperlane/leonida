@@ -266,14 +266,15 @@ public:
         }
     }
 
-private:
-    VkResult observe(VkResult result, const char* operation) const noexcept {
-        return DeviceFaultDiagnostics::observe(diagnostics_, result, operation);
-    }
-
+    // Before the back buffers' views are destroyed at once (VulkanContext::remove_resource with swapchain_idle).
     void wait_idle() {
         std::lock_guard lock(submit_mutex_);
         observe(fn_.device_wait_idle(device_), "vkDeviceWaitIdle (DXGI)");
+    }
+
+private:
+    VkResult observe(VkResult result, const char* operation) const noexcept {
+        return DeviceFaultDiagnostics::observe(diagnostics_, result, operation);
     }
 
     bool transition_image_layout(VkImage img, VkImageLayout old_layout, VkImageLayout new_layout) {

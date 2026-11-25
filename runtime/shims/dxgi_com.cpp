@@ -418,6 +418,7 @@ public:
         // The size check also keeps vkCreateImage from an extent past the device's limits.
         const DXGI_FORMAT next_format = fmt != DXGI_FORMAT_UNKNOWN ? fmt : current_format();
         if (w > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION || h > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+            swapchain_.wait_idle();  // the buffers' views go now, and the GPU may still read them
             unregister_buffers();
             lose_buffers(w, h, static_cast<UINT>(target_count), next_format);
             return E_INVALIDARG;
