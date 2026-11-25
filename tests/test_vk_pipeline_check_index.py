@@ -31,6 +31,24 @@ class ModuleFeatureGateTest(unittest.TestCase):
                          r"check_missing_module_feature\(meta\); !miss\.empty\(\)\) \{\s*"
                          r"(?://[^\n]*\s+)?record_skip\(name, stage, miss\);\s*\+\+done;\s*continue;")
 
+    def test_capability_features_are_gated_before_module_creation(self):
+        # The validation layer checks each of these at vkCreateShaderModule (VUID-VkShaderModuleCreateInfo-pCode-08740,
+        # 08742, VUID-RuntimeSpirv-Offset-10213), so a skip after the module is created comes too late.
+        source = (ROOT / "runtime" / "test" / "vk_pipeline_check.cpp").read_text(encoding="utf-8")
+        before_worker = source.partition("auto worker = [&] {")[0]
+        module_check = before_worker.split("auto check_missing_module_feature", 1)[1].split("\n    };", 1)[0]
+        pipeline_check = before_worker.split("auto check_missing_feature", 1)[1].split("\n    };", 1)[0]
+        for feature in ("meshShader", "geometryShader", "fragmentShaderBarycentric", "fragmentShaderPixelInterlock",
+                        "shaderSubgroupClock", "shaderDeviceClock", "shaderFloat64", "shaderInt64",
+                        "shaderDrawParameters", "bufferDeviceAddress", "runtimeDescriptorArray",
+                        "shaderImageGatherExtended", "shaderResourceMinLod", "shaderStorageImageWriteWithoutFormat",
+                        "shaderStorageImageReadWithoutFormat"):
+            with self.subTest(feature=feature):
+                self.assertIn(f'feat == "{feature}"', module_check)
+                self.assertNotIn(f'feat == "{feature}"', pipeline_check)
+        self.assertIn("meta.needs_maintenance8", module_check)
+        self.assertNotIn("meta.needs_maintenance8", pipeline_check)
+
 
 def find_binary():
     env = os.environ.get("LEONIDA_VK_PIPELINE_CHECK")

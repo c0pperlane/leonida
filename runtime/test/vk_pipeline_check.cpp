@@ -1283,7 +1283,6 @@ int main(int argc, char** argv) {
             }
             // Each of these is a SPIR-V capability or extension: the validation layer rejects the module
             // (VUID-VkShaderModuleCreateInfo-pCode-08740/08742) on a device without the feature.
-            // Per-format read/write support for formatless storage is checked when the runtime binds the actual view.
             if (feat == "meshShader" && !(ext_mesh && mesh.meshShader)) return "no VK_EXT_mesh_shader";
             if (feat == "geometryShader" && !f2.features.geometryShader) return "no geometryShader";
             if (feat == "fragmentShaderBarycentric" && !(ext_bary && bary.fragmentShaderBarycentric)) return "no fragmentShaderBarycentric";
@@ -1297,6 +1296,8 @@ int main(int argc, char** argv) {
             if (feat == "runtimeDescriptorArray" && !f12.runtimeDescriptorArray) return "no runtimeDescriptorArray";
             if (feat == "shaderImageGatherExtended" && !f2.features.shaderImageGatherExtended) return "no shaderImageGatherExtended";
             if (feat == "shaderResourceMinLod" && !f2.features.shaderResourceMinLod) return "no shaderResourceMinLod";
+            // Vulkan 1.3 accepts the format-less storage capabilities without these features. Per-format read/write
+            // support is checked when the runtime binds the actual view.
             if (props.apiVersion < VK_API_VERSION_1_3) {
                 if (feat == "shaderStorageImageWriteWithoutFormat" && !f2.features.shaderStorageImageWriteWithoutFormat)
                     return "no shaderStorageImageWriteWithoutFormat";
