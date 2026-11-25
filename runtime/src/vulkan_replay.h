@@ -891,9 +891,6 @@ struct GraphicsPipeline {
     std::uint32_t zero_step_slots = 0;    // per-instance slots with InstanceDataStepRate 0: stride 0 at draw time
     std::uint32_t strip_cut = 0;          // D3D12_INDEX_BUFFER_STRIP_CUT_VALUE (0: off, 1: 0xFFFF, 2: 0xFFFFFFFF)
     bool mesh = false;                    // a mesh shader instead of a vertex shader: drawn by DispatchMesh only
-    // The PSO has a geometry shader of the application's own (not the generated rectangle stage): its draws keep the
-    // driver's GSInvocations and GSPrimitives in a pipeline-statistics query (RT-PIPESTATS-NGG-GS-ZERO).
-    bool geometry = false;
     bool viewport_with_count = false;     // pipeline uses VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT / SCISSOR_WITH_COUNT
     // The same pipeline with some attachment formats VK_FORMAT_UNDEFINED, for a draw that leaves those slots
     // unbound (D3D12 allows it; dynamic rendering needs the formats to agree). Bit i: colour slot i, bit 8: depth
@@ -909,6 +906,9 @@ struct GraphicsPipeline {
     bool large = false;  // as ComputePipeline::large
     std::uint32_t samples = 1;  // rasterizationSamples; every bound attachment must have this count
     bool async_build = false;
+    // The PSO has a geometry shader of the application's own (not the generated rectangle stage): its draws keep the
+    // driver's GSInvocations and GSPrimitives in a pipeline-statistics query (RT-PIPESTATS-NGG-GS-ZERO).
+    bool geometry = false;
     bool nonunit_vertex_divisor = false;  // an actual instance divisor > 1, not a zero-stride emulation
 };
 
@@ -3354,10 +3354,9 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
         out.depth_uav_copies.push_back(copy);
         return ReplayResult::success;
     };
-    // RT-PIPESTATS-NGG-GS-ZERO: the draws so far with the application's geometry shader, and that count at the
-    // BeginQuery of each pipeline-statistics query, which its EndQuery compares (PreparedQuery::geometry).
-    std::uint32_t geometry_draws = 0;
-    std::map<std::pair<QueryHeapId, std::uint32_t>, std::uint32_t> geometry_at_begin;
+    // RT-PIPESTATS-NGG-GS-ZERO: the first draw after the BeginQuery of each pipeline-statistics query; its EndQuery
+    // looks for a geometry shader of the application's in the draws since (PreparedQuery::geometry).
+    std::map<std::pair<QueryHeapId, std::uint32_t>, std::size_t> draws_at_begin;
 
     for (std::size_t i = 0; i < commands.size(); ++i) {
         const auto& command = commands[i];
@@ -3882,11 +3881,16 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
             if (range.type == d3d12_query::pipeline_statistics && !std::holds_alternative<ResolveQueries>(command)) {
                 const auto key = std::pair{range.heap, range.first};
                 if (std::holds_alternative<BeginQuery>(command)) {
-                    geometry_at_begin[key] = geometry_draws;
+                    draws_at_begin[key] = out.draw_count;
                 } else {
                     // D3D12 begins a query in the list that ends it; without a Begin, keep the driver's counts.
-                    const auto begin = geometry_at_begin.find(key);
-                    out.queries.back().geometry = begin == geometry_at_begin.end() || begin->second != geometry_draws;
+                    const auto begin = draws_at_begin.find(key);
+                    const auto first = out.draws.begin() + std::ptrdiff_t(begin == draws_at_begin.end() ? 0 : begin->second);
+                    out.queries.back().geometry =
+                        begin == draws_at_begin.end() ||
+                        std::any_of(first, out.draws.begin() + std::ptrdiff_t(out.draw_count), [](const auto& draw) {
+                            return !draw.skipped && draw.graphics && draw.graphics->geometry;
+                        });
                 }
             }
         } else if (const auto* ind = std::get_if<ExecuteIndirect>(&command)) {
@@ -4082,7 +4086,6 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
                 if (const auto r = detail::prepare_quad_indices(*draw.state, vk, prepared_draw); r != ReplayResult::success)
                     return r;
             }
-            if (!prepared_draw.skipped && prepared_draw.graphics && prepared_draw.graphics->geometry) ++geometry_draws;
             if (draw.arguments && !prepared_draw.skipped && vk.require_indirect_clamp) {
                 const auto& arg = *draw.arguments;
                 if (!vk.prepare_indirect_clamp || !vk.emit_indirect_clamp || (statistics_active && !statistics_helpers) ||

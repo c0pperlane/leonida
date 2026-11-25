@@ -3863,9 +3863,9 @@ Implemented (`QueryHeap` in `runtime/shims/d3d12_vulkan_device.cpp`, the query c
   draws that have none: one per triangle on the Radeon 610M (RDNA2, AMD Windows driver), where `d3d12_mesh` read 2
   for its two vertex-only triangles (and `GSPrimitives` 0), and the same on an RX 6700 XT with RADV, where
   `RADV_DEBUG=nongg` gives 0 (the investigation in issue #1608, comment 7171688140). The NVIDIA RTX 5080 reads 0.
-  So `prepare()` counts the draws whose PSO has the application's geometry shader (`GraphicsPipeline::geometry`;
-  the generated rectangle-list stage does not count), and a statistics query with none of them between its Begin
-  and End resolves those two fields to 0: `emit_query` fills them with `vkCmdFillBuffer` after the copy or sum,
+  So at each statistics query's End, `prepare()` looks through the draws since its Begin for one whose PSO has the
+  application's geometry shader (`GraphicsPipeline::geometry`; the generated rectangle-list stage does not count),
+  and a query with none resolves those two fields to 0: `emit_query` fills them with `vkCmdFillBuffer` after the copy or sum,
   behind a transfer-to-transfer barrier. The heap keeps the choice (`QueryPool::no_geometry`) for a resolve in a
   later list, as it keeps `ended`. A query that holds a draw with a geometry shader keeps the driver's counts, NGG's
   extra ones for its other draws included; splitting statistics around those draws, as around mesh draws, is what
