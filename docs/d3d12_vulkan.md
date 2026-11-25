@@ -719,9 +719,13 @@ side inwards:
     UAV cannot show in a later read through a null SRV. Where the device has `VK_EXT_robustness2`'s
     `nullDescriptor` (`VulkanDeviceInfo::null_descriptor`, enabled alone) they are null descriptors, and the
     store or atomic is dropped and a load reads zero, as on the console; without it they are 1x1 images of their
-    own. A null V# (all zeros) needs no fallback: every access through it is out of range (`NUM_RECORDS` 0), so
-    loads give 0 and stores and atomics do nothing (`tests/semantic/test_null_vsharp.py`). Checked on the GPU by
-    `vk_null_descriptor_test` (every dimension and class, both kinds of storage fallback).
+    own. The null load reads zero in all four components through a storage array declared without a format, as
+    translated shaders declare theirs. Through a format of fewer than four components (the r32ui atomic arrays,
+    or `r32ui`/`r32i` in a hand-written shader) Vulkan's component substitution may make alpha 1, and AMD's driver
+    does (the conformance tests accept 0 or 1 there). A null V# (all zeros) needs no fallback: every access through
+    it is out of range (`NUM_RECORDS` 0), so loads give 0 and stores and atomics do nothing
+    (`tests/semantic/test_null_vsharp.py`). Checked on the GPU by `vk_null_descriptor_test` (every dimension and
+    class, both kinds of storage fallback, storage arrays with and without a format).
   - Changes are queued and written by `flush()`, one write a slot, so a view that is removed before the next
     flush is never written.
   - `flush()` also uploads the table to its buffer: device-local memory, written from a mapped staging copy when

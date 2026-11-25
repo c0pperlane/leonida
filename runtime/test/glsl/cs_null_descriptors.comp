@@ -11,8 +11,17 @@
 //   16.. sampled fetches: 2D, 2D array, 3D, 1D, then the real 2D image; 36.. sampled with the found sampler:
 //   2D, cube (layer 3, clamped), 3D, 1D; 64.. storage loads (2D, 2D array, 3D, 1D) x (float, uint, sint);
 //   112, 113: the 2D and 3D atomics of mode 1.
+// Built twice: with a format on every storage array (r32ui, r32i, rgba8), and with -DUNFORMATTED without one, as
+// tools/rdna2spirv.py declares the storage arrays of bindings 8-19 (StorageImageReadWithoutFormat and
+// StorageImageWriteWithoutFormat); the atomics keep R32ui in both, as there.
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_samplerless_texture_functions : require
+#ifdef UNFORMATTED
+#extension GL_EXT_shader_image_load_formatted : require
+#define STORAGE(b, format) layout(set = 0, binding = b)
+#else
+#define STORAGE(b, format) layout(set = 0, binding = b, format)
+#endif
 
 layout(local_size_x = 1) in;
 
@@ -26,18 +35,18 @@ layout(set = 0, binding = 5) uniform texture1D lines[];
 layout(set = 0, binding = 6) uniform texture3D volumes[];
 layout(set = 0, binding = 4, r32ui) uniform uimage2D atomics_2d[];
 layout(set = 0, binding = 7, r32ui) uniform uimage3D atomics_3d[];
-layout(set = 0, binding = 8, rgba8) uniform image2D store_2d_f[];
-layout(set = 0, binding = 9, r32ui) uniform uimage2D store_2d_u[];
-layout(set = 0, binding = 10, r32i) uniform iimage2D store_2d_i[];
-layout(set = 0, binding = 11, rgba8) uniform image2DArray store_arr_f[];
-layout(set = 0, binding = 12, r32ui) uniform uimage2DArray store_arr_u[];
-layout(set = 0, binding = 13, r32i) uniform iimage2DArray store_arr_i[];
-layout(set = 0, binding = 14, rgba8) uniform image3D store_3d_f[];
-layout(set = 0, binding = 15, r32ui) uniform uimage3D store_3d_u[];
-layout(set = 0, binding = 16, r32i) uniform iimage3D store_3d_i[];
-layout(set = 0, binding = 17, rgba8) uniform image1D store_1d_f[];
-layout(set = 0, binding = 18, r32ui) uniform uimage1D store_1d_u[];
-layout(set = 0, binding = 19, r32i) uniform iimage1D store_1d_i[];
+STORAGE(8, rgba8) uniform image2D store_2d_f[];
+STORAGE(9, r32ui) uniform uimage2D store_2d_u[];
+STORAGE(10, r32i) uniform iimage2D store_2d_i[];
+STORAGE(11, rgba8) uniform image2DArray store_arr_f[];
+STORAGE(12, r32ui) uniform uimage2DArray store_arr_u[];
+STORAGE(13, r32i) uniform iimage2DArray store_arr_i[];
+STORAGE(14, rgba8) uniform image3D store_3d_f[];
+STORAGE(15, r32ui) uniform uimage3D store_3d_u[];
+STORAGE(16, r32i) uniform iimage3D store_3d_i[];
+STORAGE(17, rgba8) uniform image1D store_1d_f[];
+STORAGE(18, r32ui) uniform uimage1D store_1d_u[];
+STORAGE(19, r32i) uniform iimage1D store_1d_i[];
 
 layout(set = 1, binding = 0, std430) buffer Result { uint result[]; };
 layout(set = 1, binding = 1, std430) readonly buffer Keys { uint keys[]; };  // 6 keys of 8 words

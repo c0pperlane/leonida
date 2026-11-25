@@ -2100,6 +2100,18 @@ if(TARGET Vulkan::Headers)
     target_sources(vk_null_descriptor_test PRIVATE ${_null_descriptors_spv})
     target_compile_definitions(vk_null_descriptor_test PRIVATE
                                LEONIDA_TEST_NULL_DESCRIPTORS_SPV="${_null_descriptors_spv}")
+    # The same shader with the storage arrays declared without a format, as translated shaders declare them; the test
+    # runs it where the device reads and writes storage images without a format.
+    set(_null_descriptors_unformatted_spv ${CMAKE_CURRENT_BINARY_DIR}/generated/cs_null_descriptors_unformatted.spv)
+    add_custom_command(OUTPUT ${_null_descriptors_unformatted_spv}
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/generated
+      COMMAND ${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE} -V --target-env vulkan1.3 -DUNFORMATTED
+              -o ${_null_descriptors_unformatted_spv} ${CMAKE_CURRENT_SOURCE_DIR}/test/glsl/cs_null_descriptors.comp
+      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test/glsl/cs_null_descriptors.comp
+      COMMENT "Compiling the null descriptor test shader without storage formats" VERBATIM)
+    target_sources(vk_null_descriptor_test PRIVATE ${_null_descriptors_unformatted_spv})
+    target_compile_definitions(vk_null_descriptor_test PRIVATE
+                               LEONIDA_TEST_NULL_DESCRIPTORS_UNFORMATTED_SPV="${_null_descriptors_unformatted_spv}")
   else()
     message(STATUS "glslangValidator not found: vk_null_descriptor_test skips")
   endif()

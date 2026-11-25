@@ -14,7 +14,9 @@
 // must read its clear colour (so the reads are not vacuous). Twice: with BindlessFeatures::null_descriptor (where the
 // device has VK_EXT_robustness2 nullDescriptor), where the stores and atomics are dropped (storage reads and atomic
 // results zero too); and without it, where the storage fallbacks are images of their own that keep the stores,
-// apart from the sampled ones.
+// apart from the sampled ones. Each with the shader's storage arrays declared with a format and, where the device
+// reads and writes storage images without one, without a format, as translated shaders declare them
+// (check_null_storage says what each must read).
 // Exit 77 without a Vulkan device with the bindless features, or without the shader (no glslangValidator).
 // LEONIDA_VK_VALIDATION=1 runs under VK_LAYER_KHRONOS_validation; a validation error fails the test.
 #ifndef VK_NO_PROTOTYPES
@@ -58,8 +60,8 @@ std::vector<std::uint32_t> load_spirv(const char* path) {
     return words;
 }
 
-// One run of the scenario on a new set with `null_descriptor`; the result words in `out`.
-int run(vktest::Device& d, const VkPhysicalDeviceMemoryProperties& memory, bool null_descriptor,
+// One run of the scenario on a new set with `null_descriptor`, with the shader at `spirv`; the result words in `out`.
+int run(vktest::Device& d, const VkPhysicalDeviceMemoryProperties& memory, bool null_descriptor, const char* spirv,
         std::array<std::uint32_t, result_words>& out) {
     const VkDevice dev = d.device;
     BindlessFeatures features;
@@ -94,7 +96,7 @@ int run(vktest::Device& d, const VkPhysicalDeviceMemoryProperties& memory, bool 
     std::memset(result_map, 0xcd, result_words * 4);
     std::memcpy(key_map, keys.data(), sizeof(keys));
 
-    const std::vector<std::uint32_t> code = load_spirv(LEONIDA_TEST_NULL_DESCRIPTORS_SPV);
+    const std::vector<std::uint32_t> code = load_spirv(spirv);
     EXPECT(!code.empty());
     VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     module_info.codeSize = code.size() * 4;
@@ -218,6 +220,24 @@ void print(const char* what, const std::array<std::uint32_t, result_words>& r, s
     std::printf("\n");
 }
 
+// The storage loads through null descriptors (words 64..111: 2D, 2D array, 3D, 1D, each as float, uint, sint). Vulkan
+// has a load from a null descriptor return zero values (VkWriteDescriptorSet), and the conformance tests
+// (VK-GL-CTS robustness/vktRobustnessExtsTests.cpp) hold a load with no format to all four components zero. That is
+// how translated shaders read the storage arrays of bindings 8-19 (tools/rdna2spirv.py declares them without a
+// format) and what the runtime relies on, so the unformatted shader checks every word. A load through a format of
+// fewer than four components (r32ui, r32i) still gets component substitution, which supplies a missing alpha as 1,
+// and the same tests accept alpha 0 or 1 there: NVIDIA reads 0, AMD 1 (Radeon 610M, driver 32.0.21030.34003). So
+// the formatted shader allows either alpha for its uint and sint views.
+int check_null_storage(const std::array<std::uint32_t, result_words>& r, bool unformatted) {
+    for (std::uint32_t view = 0; view < 12; ++view) {
+        const std::uint32_t* texel = &r[64 + 4 * view];
+        const bool fewer_than_four = !unformatted && view % 3 != 0;  // the r32ui and r32i views
+        EXPECT(texel[0] == 0 && texel[1] == 0 && texel[2] == 0);
+        EXPECT(texel[3] == 0 || (fewer_than_four && texel[3] == 1));
+    }
+    return 0;
+}
+
 // The checks every mode shares: the keys' indices, the sampled fallbacks and the real image.
 int check_common(const std::array<std::uint32_t, result_words>& r) {
     print("indices (0 3D cube 1D real S#)", r, 0, 6);
@@ -261,26 +281,40 @@ int main() {
     VkPhysicalDeviceMemoryProperties memory{};
     d.instance_fn<PFN_vkGetPhysicalDeviceMemoryProperties>("vkGetPhysicalDeviceMemoryProperties")(d.physical, &memory);
 
-    std::array<std::uint32_t, result_words> r{};
-    if (d.null_descriptor) {
-        std::printf("null descriptors (VK_EXT_robustness2 nullDescriptor):\n");
-        EXPECT(run(d, memory, true, r) == 0);
-        EXPECT(check_common(r) == 0);
-        // The stores were dropped: every storage fallback reads zero, and the atomics returned zero both times.
-        for (std::uint32_t i = 64; i < 112; ++i) EXPECT(r[i] == 0);
-        EXPECT(r[8] == 0 && r[9] == 0 && r[112] == 0 && r[113] == 0);
-    } else {
+    struct Shader {
+        const char* name;
+        const char* spirv;
+        bool unformatted;
+    };
+    std::vector<Shader> shaders{{"storage formats", LEONIDA_TEST_NULL_DESCRIPTORS_SPV, false}};
+    if (d.enabled.shaderStorageImageReadWithoutFormat && d.enabled.shaderStorageImageWriteWithoutFormat)
+        shaders.push_back({"no storage format", LEONIDA_TEST_NULL_DESCRIPTORS_UNFORMATTED_SPV, true});
+    else
+        std::printf("the device cannot read and write storage images without a format: only the formatted shader\n");
+    if (!d.null_descriptor)
         std::printf("the device has no VK_EXT_robustness2 nullDescriptor: only the image fallbacks are tested\n");
-    }
 
-    std::printf("storage fallback images:\n");
-    EXPECT(run(d, memory, false, r) == 0);
-    EXPECT(check_common(r) == 0);
-    // The storage fallbacks are images of their own: they took the stores (which the sampled reads above did not
-    // see), and the atomics of pass 1 found what pass 0 left. (The uint class's storage fallback is also the
-    // r32ui one, so the exact values depend on the order of pass 0's store and add, which is not checked.)
-    EXPECT(r[64] != 0 && r[88] != 0 && r[100] != 0);
-    EXPECT(r[112] != 0 && r[113] != 0);
+    std::array<std::uint32_t, result_words> r{};
+    for (const Shader& shader : shaders) {
+        if (d.null_descriptor) {
+            std::printf("%s, null descriptors (VK_EXT_robustness2 nullDescriptor):\n", shader.name);
+            EXPECT(run(d, memory, true, shader.spirv, r) == 0);
+            EXPECT(check_common(r) == 0);
+            // The stores were dropped: every storage fallback reads zero (in the components Vulkan says it must), and
+            // the atomics returned zero both times.
+            EXPECT(check_null_storage(r, shader.unformatted) == 0);
+            EXPECT(r[8] == 0 && r[9] == 0 && r[112] == 0 && r[113] == 0);
+        }
+
+        std::printf("%s, storage fallback images:\n", shader.name);
+        EXPECT(run(d, memory, false, shader.spirv, r) == 0);
+        EXPECT(check_common(r) == 0);
+        // The storage fallbacks are images of their own: they took the stores (which the sampled reads above did not
+        // see), and the atomics of pass 1 found what pass 0 left. (The uint class's storage fallback is also the
+        // r32ui one, so the exact values depend on the order of pass 0's store and add, which is not checked.)
+        EXPECT(r[64] != 0 && r[88] != 0 && r[100] != 0);
+        EXPECT(r[112] != 0 && r[113] != 0);
+    }
 
     if (d.validation_errors()) {
         std::printf("%u validation errors\n", d.validation_errors());
