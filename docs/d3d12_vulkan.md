@@ -3460,7 +3460,9 @@ textures and blits them at present time, which frees the game's buffer count and
 The DXGI shim keeps a ring of offscreen images with the requested buffer count. `GetBuffer(i)` returns the
 same image for a given index until a resize. `Present` blits the current image into the acquired surface image
 and advances to the next slot. On a chain created with `DXGI_USAGE_SHADER_INPUT`,
-`CreateShaderResourceView` accepts a default view or an explicit view in the back buffer's format.
+`CreateShaderResourceView` accepts a default view or an explicit 2D view in the back buffer's format, and an
+`_SRGB` view of an `R8G8B8A8_UNORM` or `B8G8R8A8_UNORM` buffer (the offscreen images of those two formats are
+mutable and list the sRGB partner).
 The `dxgi_backbuffer_srv` test checks the sampled colours across `Present` and `ResizeBuffers`, and while
 the application holds a `GetBuffer` reference after releasing the chain.
 
