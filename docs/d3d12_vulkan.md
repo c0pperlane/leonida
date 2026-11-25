@@ -2232,7 +2232,10 @@ Things that can invalidate this simple model, all **Open**:
   flag tells us direct indexing is enabled; the shader's address arithmetic identifies the base.
 - **Static samplers.** D3D12 static samplers do not consume root parameters. The console driver may place their
   S# values in a fixed table. The layer registers every static sampler's S# in the hash table, so a shader that
-  loads it by value works; a shader that expects a driver table needs that table's location (**Open**).
+  loads it by value works; a shader that expects a driver table needs that table's location. **Measured
+  (SHADER-735): no sampling instruction in the corpus was found reading an S# from a fixed table** (0 of 366,628;
+  0.66% stay undetermined under the conservative reading), so on this evidence the layer has none to emulate; the
+  counts and their limits are under "Where the sampled S# comes from" below.
   `CreateRootSignature` does the registering, for 1.0, 1.1 and 1.2 blobs: each static sampler is encoded as
   `CreateSampler2` encodes the same description (the five `D3D12_STATIC_BORDER_COLOR` values, two of them UINT, and
   the 1.2 flags), and gets a sampler in set 0 and a key in the hash table without a heap slot. The entry outlives
@@ -2248,10 +2251,6 @@ Things that can invalidate this simple model, all **Open**:
   console form has no compare bit, so a comparison and a plain static sampler with the same other fields share
   it: the first one registered keeps it and the second is logged. `d3d12_descriptor_test` checks the key for a
   LINEAR/LESS_EQUAL description and for a POINT NEVER comparison.
-  loads it by value works; a shader that expects a driver table needs that table's location. **Measured
-  (SHADER-735): no sampling instruction in the corpus was found reading an S# from a fixed table** (0 of 366,628;
-  0.66% stay undetermined under the conservative reading), so on this evidence the layer has none to emulate; the
-  counts and their limits are under "Where the sampled S# comes from" below.
 - **Descriptor-table high-dword truncation.** If a shader forces the high dword of a table pointer to zero, the
   table must be below 4 GB; the layer allocates all shader-visible heaps there. If a shader forces a resource VA's
   high dword to zero, the resource must also be low; that would constrain the arena layout. Measured on 2026-11-22
