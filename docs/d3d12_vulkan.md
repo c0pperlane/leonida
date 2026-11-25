@@ -2237,6 +2237,17 @@ Things that can invalidate this simple model, all **Open**:
   `CreateSampler2` encodes the same description (the five `D3D12_STATIC_BORDER_COLOR` values, two of them UINT, and
   the 1.2 flags), and gets a sampler in set 0 and a key in the hash table without a heap slot. The entry outlives
   the root signature. `d3d12_descriptor_test` checks the key before and after and samples with it.
+  A second key, with the same Vulkan sampler behind it, is the S# as the console's shader compiler bakes it into a
+  shader (`console_static_sampler_words` in `d3d12_vulkan_device.cpp`): `DEPTH_COMPARE_FUNC` is
+  `ComparisonFunc - 1` even for a plain filter, a `MaxLOD` of 16 or more saturates `MAX_LOD` to 0xFFF instead of
+  15.0, WORD2 bit 28 (Mesa's `MIP_POINT_PRECLAMP`) is set, the border colour type and pointer are zero unless an
+  address mode uses the border, and the layer's `kCompareNever` mark is dropped. These come from one measured pair
+  (the static sampler of `amd_fidelityfx_upscaler_xbox.dll` and the literal S# its sampling program uses; branch
+  `old-pr/4765`) and agree with the 27 distinct literal S# values of the game's shaders; a `MaxLOD` between 15
+  and 16 and an integer border with a border address mode are not measured and keep the layer's encoding. The
+  console form has no compare bit, so a comparison and a plain static sampler with the same other fields share
+  it: the first one registered keeps it and the second is logged. `d3d12_descriptor_test` checks the key for a
+  LINEAR/LESS_EQUAL description and for a POINT NEVER comparison.
   loads it by value works; a shader that expects a driver table needs that table's location. **Measured
   (SHADER-735): no sampling instruction in the corpus was found reading an S# from a fixed table** (0 of 366,628;
   0.66% stay undetermined under the conservative reading), so on this evidence the layer has none to emulate; the
